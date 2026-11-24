@@ -266,6 +266,12 @@ describe('webhook de respuestas', () => {
       expect((await statesOf(created.id)).status).toBe('scheduled');
     });
 
+    it('un from con SQL no altera la consulta', async () => {
+      const created = await sentAppointment();
+      await replyOk('NO', { from: "x' or '1'='1" });
+      expect((await statesOf(created.id)).status).toBe('scheduled');
+    });
+
     it('solo cuentan los recordatorios ya enviados a ese teléfono', async () => {
       const clinic = await createClinic(t);
       const created = await book(clinic);
@@ -304,6 +310,26 @@ describe('webhook de respuestas', () => {
       await replyOk('NO');
       expect((await statesOf(x.id)).status).toBe('cancelled');
       expect((await statesOf(y.id)).status).toBe('scheduled');
+    });
+
+    it('decide el número de envío aunque sentAt vaya hacia atrás', async () => {
+      // Con varias réplicas, sentAt sale del reloj de cada una y puede no
+      // crecer; aquí se reproduce moviendo el reloj de test hacia atrás.
+      const clinic = await createClinic(t);
+      const first = await book(clinic);
+      await t.setClock(T);
+      expect(await runJob()).toBe(1);
+      // 09:30 de Madrid: la cita nace con la hora de envío ya pasada y sale ahora.
+      await t.setClock('2027-03-27T08:30:00Z');
+      const second = await book(clinic, '2027-03-27T12:00:00Z');
+      expect(await runJob()).toBe(1);
+      expect((await appointment(second.id)).reminders[0]?.sentAt).toBe(
+        '2027-03-27T08:30:00Z',
+      );
+
+      await replyOk('NO');
+      expect((await statesOf(second.id)).status).toBe('cancelled');
+      expect((await statesOf(first.id)).status).toBe('scheduled');
     });
 
     it('ignora una cita que ya empezó y cae en la anterior', async () => {
@@ -441,6 +467,7 @@ describe('webhook de respuestas', () => {
       ['sin text', without('text')],
       ['sin receivedAt', without('receivedAt')],
       ['vacío', {}],
+      ['que es una lista', [valid]],
       ['con messageId numérico', { ...valid, messageId: 1 }],
       ['con from numérico', { ...valid, from: 34600111222 }],
       ['con text null', { ...valid, text: null }],
