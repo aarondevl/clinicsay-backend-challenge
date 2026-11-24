@@ -50,6 +50,9 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 - `verify` ejecuta `lint` (oxlint con reglas que usan los tipos), `typecheck`
   (`tsc --noEmit`, que también revisa los specs; `nest build` no los mira),
   `test` y `test:e2e`.
+- El compose publica Postgres solo en `127.0.0.1:55432` (no en el 5432, para
+  no chocar con un Postgres local); es el puerto por defecto de `loadConfig` y
+  de los e2e.
 - Los e2e usan la base `clinicsay_test` (`TEST_DATABASE_URL`) y lanzan su propio
   proveedor en el puerto 4011, así que no interfieren con un compose levantado.
   El `globalSetup` (`test/support/global-setup.ts`) crea esa base si no existe

@@ -1159,7 +1159,29 @@ Rama `docs/entrega`.
   - tests añadidos: 503 al cortar un proxy TCP entre la app y Postgres, y en
     `test/persistence.e2e-spec.ts` el índice `reminder_one_pending`, el
     `check` del estado y `reset()`;
-  - la migración solo tiene `up()`.
+  - la migración solo tiene `up()`;
+  - tras la revisión final, `db` se publica en `127.0.0.1:55432` y no en
+    `5432:5432` como decía el plan: con un Postgres local en el 5432,
+    `docker compose up` no arrancaba (reproducido). La api no necesita ese
+    puerto;
+  - el healthcheck de `db` usa `pg_isready -h 127.0.0.1`: por socket daba por
+    lista la base durante el servidor temporal de la primera inicialización,
+    que no escucha por TCP (reproducido), y la api podía salir sin reintento.
+    Además, `api` lleva `restart: on-failure`.
 
-  Siguiente paso: después del merge, `compose` como check obligatorio de
-  `main`; luego la tarea 3.
+  La revisión dejó para otro cambio: `/health` no comprueba que las
+  migraciones sigan aplicadas si la base se recrea en caliente; el pool no
+  tiene `connectionTimeoutMillis`, así que `/health` puede quedarse esperando
+  con el pool agotado; `reset()` vacía las tablas que tienen entidad, no las
+  de `pg_tables`; `ProviderAdmin.requests()` no admite `idempotencyKey: null`;
+  si `app.close()` falla tras una migración fallida se pierde el error
+  original; y `registerRequestContext: false` solo se explica en
+  `persistence.module.ts`. Para la tarea 7 sugirió un modo del proxy TCP que
+  acepte y no responda (timeout determinista) y abortar el job en
+  `beforeApplicationShutdown`, que llega antes de que Nest cierre MikroORM.
+
+  Verificación: `npm run verify` en verde tras el merge de `main` (8 archivos
+  y 38 unitarios, 3 archivos y 10 e2e); `docker compose up --build -d --wait`
+  con el 5432 del host ocupado, `/health` en 200, 503 al parar `db` y 200 al
+  volver. Siguiente paso: revisar y mergear la PR y, después, `compose` como
+  check obligatorio de `main`; luego la tarea 3.
