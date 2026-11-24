@@ -5,6 +5,7 @@ import { Transactions } from '../src/application/ports/transactions.js';
 import type { Appointment } from '../src/domain/appointment.js';
 import { cancelReminder, type Reminder } from '../src/domain/reminder.js';
 import { startTestApp, type TestApp } from './support/app.js';
+import { holdLock } from './support/locks.js';
 import {
   type AppointmentBody,
   createAppointment,
@@ -81,38 +82,6 @@ describe('reprogramar y cancelar', () => {
     return reminder;
   }
 
-  /**
-   * Abre una transacción que ejecuta `lock` y se queda con el bloqueo hasta
-   * que se llame a `release`; entonces ejecuta `then` y confirma.
-   */
-  async function holdLock(
-    lock: (
-      repos: Parameters<Parameters<Transactions['run']>[0]>[0],
-    ) => Promise<unknown>,
-    then: (
-      repos: Parameters<Parameters<Transactions['run']>[0]>[0],
-    ) => Promise<void> = async () => {},
-  ): Promise<{ release: () => void; done: Promise<void> }> {
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    let locked!: () => void;
-    const isLocked = new Promise<void>((resolve) => (locked = resolve));
-    const done = transactions.run(async (repos) => {
-      await lock(repos);
-      locked();
-      await released;
-      await then(repos);
-    });
-    // Si la transacción falla antes de bloquear, el test falla ya y no espera.
-    await Promise.race([
-      isLocked,
-      done.then(() => {
-        throw new Error('transaction finished without holding the lock');
-      }),
-    ]);
-    return { release, done };
-  }
-
   describe('repositorios', () => {
     it('AppointmentRepository.update guarda la hora y el estado', async () => {
       const created = await madridAppointment();
@@ -143,6 +112,7 @@ describe('reprogramar y cancelar', () => {
       const created = await madridAppointment();
       const stored = await storedAppointment(created.id);
       const first = await holdLock(
+        transactions,
         (repos) => repos.appointments.lockById(created.id),
         (repos) =>
           repos.appointments.update({ ...stored, status: 'confirmed' }),
@@ -200,6 +170,7 @@ describe('reprogramar y cancelar', () => {
     it('lockPendingByAppointment espera al bloqueo del pendiente y ve su estado final', async () => {
       const created = await madridAppointment();
       const first = await holdLock(
+        transactions,
         (repos) => repos.reminders.lockPendingByAppointment(created.id),
         async (repos) => {
           const [pending] = await repos.reminders.lockPendingByAppointment(
@@ -479,7 +450,7 @@ describe('reprogramar y cancelar', () => {
     it('cancelar mientras un PATCH espera al job no pierde la hora nueva ni deja un pendiente', async () => {
       const created = await madridAppointment();
       // Hace de job: retiene el pendiente como si lo estuviera enviando.
-      const job = await holdLock((repos) =>
+      const job = await holdLock(transactions, (repos) =>
         repos.reminders.lockPendingByAppointment(created.id),
       );
       // El PATCH bloquea la cita y espera al pendiente; el cancelar llega después.
