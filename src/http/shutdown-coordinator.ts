@@ -6,9 +6,10 @@ import { type BeforeApplicationShutdown, Injectable } from '@nestjs/common';
  * recordatorio y espera a las que estén en curso, que terminan y guardan el
  * que tienen entre manos.
  *
- * Lo hace en `beforeApplicationShutdown` porque Nest lo llama antes de
- * cerrar el servidor HTTP y antes de `onApplicationShutdown`, que es cuando
- * MikroORM cierra la base: así la pasada todavía puede confirmar.
+ * Lo hace en `beforeApplicationShutdown`, que Nest llama antes de cerrar el
+ * servidor HTTP y antes de `onApplicationShutdown` (cuando MikroORM cierra la
+ * base). Más tarde no serviría: cerrar el servidor espera a la petición del
+ * job, y una pasada sin abortar seguiría hasta vaciar la cola.
  */
 @Injectable()
 export class ShutdownCoordinator implements BeforeApplicationShutdown {

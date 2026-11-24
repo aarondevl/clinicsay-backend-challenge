@@ -101,7 +101,7 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 | `src/domain` | Tipos y funciones puras | `@nestjs/*`, `@mikro-orm/*`, red, `process.env`, la hora actual |
 | `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `IdGenerator`, `Transactions`, repositorios, `MessageProvider`) como clases abstractas | `@nestjs/*`, `@mikro-orm/*`, `src/http`, `src/infrastructure` |
 | `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes, el generador de ids y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
-| `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores | `@mikro-orm/*` |
+| `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores y `ShutdownCoordinator` (cierre ordenado del job) | `@mikro-orm/*` |
 | `src/app.module.ts`, `src/app.factory.ts`, `src/main.ts`, `src/config/` | Composición: cablea todo | — |
 
 - `test/architecture.spec.ts` comprueba los imports de `src/domain` y
@@ -177,9 +177,9 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   lo que evita que el paciente reciba dos mensajes tras un 504.
 - **Descartes al enviar**, en este orden: `too_late` (la cita ya empezó),
   `no_phone`, `opted_out`. Ninguno llama al proveedor.
-- **Proveedor:** 202 o 200 (duplicado) → `sent`. Cualquier 4xx → `failed`, sin
-  reintento. 5xx, error de red, más de 5000 ms o un código que el enunciado no
-  contempla → reintento. `attempts` cuenta las llamadas hechas al proveedor.
+- **Proveedor:** 202 o 200 (duplicado) → `sent`, igual que cualquier otro 2xx.
+  Cualquier 4xx → `failed`, sin reintento. 5xx, error de red, más de 5000 ms,
+  1xx o 3xx → reintento. `attempts` cuenta las llamadas hechas al proveedor.
   `sentAt` y la hora desde la que cuenta el reintento son la del servicio
   después de la llamada; `too_late` se mira antes. `sendSeq` (secuencia
   `reminder_send_seq`) y `sentTo` solo se fijan al quedar `sent`.
@@ -187,10 +187,11 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   única definición de esos valores. El reintento mueve `next_attempt_at`, no
   `scheduledFor`, y no espera a que acabe la franja de silencio.
 - **Cierre ordenado:** `ShutdownCoordinator` aborta la señal de las pasadas en
-  `beforeApplicationShutdown`, que Nest llama antes de cerrar el servidor
-  HTTP y la base (MikroORM cierra en `onApplicationShutdown`), y espera a las
-  que están en curso: ninguna toma otro recordatorio y la que tiene uno lo
-  guarda antes de que se cierre la base.
+  `beforeApplicationShutdown` y espera a las que están en curso: ninguna toma
+  otro recordatorio y la que tiene uno lo guarda antes de que se cierre la
+  base. Tiene que ser ahí y no en `onApplicationShutdown`: Nest cierra antes
+  el servidor HTTP, que espera a la petición del job, y una pasada sin
+  abortar seguiría hasta vaciar la cola.
 - **Franja de silencio:** `[21:00, 09:00)` en hora local; lo que cae dentro pasa
   a las 09:00 siguientes. Las citas con `virtual: true` usan `Europe/Madrid`
   para la hora, la franja y el texto. `virtual` es una extensión opcional del

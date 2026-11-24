@@ -14,8 +14,8 @@ export class JobsController {
 
   /**
    * `POST /jobs/reminders/run` → 200 `{ processed }` al terminar la pasada:
-   * los recordatorios que trató esta pasada (enviados, reintentados o
-   * descartados). Durante el cierre de la app responde `{ processed: 0 }` sin
+   * los recordatorios que trató esta pasada (enviados, reintentados,
+   * fallidos o descartados). Durante el cierre de la app responde `{ processed: 0 }` sin
    * tomar ninguno.
    * @throws {ServiceUnavailableError} (503) si la base no responde.
    */
