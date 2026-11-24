@@ -208,12 +208,18 @@ Se aplican a todo código nuevo y a los archivos que un cambio toca.
   `src/application/ports/`, nunca de una implementación; las implementaciones
   se eligen solo en `app.module.ts`. Fuera de la composición y de los tests,
   nada hace `new` de un repositorio, un cliente HTTP o un reloj.
-- **Errores propios, traducidos a HTTP en un solo sitio.** `domain` y
-  `application` lanzan errores tipados de `src/application/errors.ts`
+- **Errores propios, traducidos a HTTP en un solo sitio.** Los casos de uso
+  de `application` lanzan errores tipados de `src/application/errors.ts`
   (`ValidationError`, `NotFoundError`, `ConflictError`); si hace falta otro,
   se añade ahí y se traduce en `ErrorFilter`. Solo `src/http` conoce los
   códigos HTTP: los casos de uso no lanzan `HttpException` ni importan
   `@nestjs/*`, para que se prueben sin Nest.
+- **`domain` no importa `application`** (lo comprueba
+  `test/architecture.spec.ts`), así que no lanza esos errores. Una regla de
+  negocio que puede no cumplirse devuelve un resultado (como `skipReason` en
+  `ReminderPlan`) y el caso de uso decide el error. Un `Error` simple solo
+  señala un fallo de programación, como una zona que debió validarse antes, y
+  el filtro lo convierte en 500.
 - **`try/catch` en los límites con E/S** (proveedor, base de datos,
   `/health`): convierte el fallo externo en un resultado tipado
   (`ProviderResult`, 503) o en un error propio. Cada `catch` traduce, registra
