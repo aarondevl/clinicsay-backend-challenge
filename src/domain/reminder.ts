@@ -53,3 +53,13 @@ export function newReminder(
     sendSeq: null,
   };
 }
+
+/**
+ * Cancela el recordatorio si sigue `pending` y le quita el próximo intento;
+ * conserva `attempts`. Uno en cualquier otro estado se devuelve igual: un
+ * `sent` se queda `sent` aunque la cita se reprograme o se cancele.
+ */
+export function cancelReminder(reminder: Reminder): Reminder {
+  if (reminder.status !== 'pending') return reminder;
+  return { ...reminder, status: 'cancelled', nextAttemptAt: null };
+}
