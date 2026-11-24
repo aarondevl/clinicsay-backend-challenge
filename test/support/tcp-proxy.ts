@@ -1,8 +1,18 @@
 import { createConnection, createServer, type Socket } from 'node:net';
 
-/** Proxy TCP local que se puede cortar para simular la caída de un servicio. */
+/**
+ * Proxy TCP local que se puede cortar para simular la caída de un servicio, o
+ * dejar sin respuestas para simular uno que tarda más que el timeout.
+ */
 export interface TcpProxy {
   port: number;
+  /**
+   * Con `true`, lo que envía el cliente sigue llegando al destino, pero lo que
+   * responde el destino se descarta: el servicio procesa la petición y el
+   * cliente nunca ve la respuesta ni el cierre de la conexión. Con `false`
+   * vuelve a reenviarlo todo.
+   */
+  dropResponses(drop: boolean): void;
   /** Deja de aceptar conexiones y corta las abiertas. Se puede llamar varias veces. */
   close(): Promise<void>;
 }
@@ -20,13 +30,23 @@ export async function startTcpProxy(
     socket.on('error', () => socket.destroy());
   };
 
+  let dropping = false;
   const server = createServer((client) => {
     const upstream = createConnection(targetPort, targetHost);
     track(client);
     track(upstream);
-    client.pipe(upstream).pipe(client);
+    client.pipe(upstream);
+    // Se mira en cada trozo, así que también vale para conexiones ya abiertas.
+    upstream.on('data', (chunk: Buffer) => {
+      if (!dropping) client.write(chunk);
+    });
     client.on('close', () => upstream.destroy());
-    upstream.on('close', () => client.destroy());
+    // Sin respuestas, el cliente tampoco se entera de que el destino cerró
+    // (el proveedor cierra a los 5 s una conexión inactiva): solo le queda
+    // su propio timeout. `close()` corta igualmente estos sockets.
+    upstream.on('close', () => {
+      if (!dropping) client.destroy();
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -41,6 +61,9 @@ export async function startTcpProxy(
   let closing: Promise<void> | null = null;
   return {
     port: address.port,
+    dropResponses(drop) {
+      dropping = drop;
+    },
     close() {
       closing ??= new Promise<void>((resolve) => {
         for (const socket of sockets) socket.destroy();

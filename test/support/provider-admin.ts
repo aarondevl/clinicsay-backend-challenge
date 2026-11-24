@@ -19,8 +19,11 @@ export interface ProviderAdmin {
   rule(to: string, mode: ProviderRuleMode, count: number): Promise<void>;
   /** Mensajes entregados a `to`, en orden de entrega. */
   messages(to: string): Promise<ProviderMessage[]>;
-  /** Todas las peticiones recibidas para `to`, con el código que devolvió. */
-  requests(to: string): Promise<ProviderRequest[]>;
+  /**
+   * Peticiones recibidas para `to` (o todas, sin `to`), en orden de llegada y
+   * con el código que devolvió.
+   */
+  requests(to?: string): Promise<ProviderRequest[]>;
   /** Olvida mensajes, peticiones y reglas. */
   reset(): Promise<void>;
 }
@@ -58,7 +61,8 @@ function asString(value: unknown, field: string): string {
  * Solo se usa en los tests: el servicio no conoce esta API.
  */
 export function createProviderAdmin(baseUrl: string): ProviderAdmin {
-  const query = (to: string) => `?to=${encodeURIComponent(to)}`;
+  const query = (to?: string) =>
+    to === undefined ? '' : `?to=${encodeURIComponent(to)}`;
   return {
     async rule(to, mode, count) {
       const res = await fetch(`${baseUrl}/admin/rules`, {
