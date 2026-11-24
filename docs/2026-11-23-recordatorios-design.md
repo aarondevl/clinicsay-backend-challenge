@@ -1516,9 +1516,11 @@ Rama `docs/entrega`.
 
   Verificación: `npm run verify` en verde (17 archivos y 169 unitarios,
   7 archivos y 128 e2e) y `docker compose -p clinicsay up --build -d --wait`
-  con un recorrido a mano: envío a su hora con el texto exacto, 503 y envío
-  al minuto, 422 → `failed`, y 5 pasadas a la vez sobre 20 recordatorios
-  (20 peticiones, 20 claves distintas, todas 202). `scripts/smoke.sh` llega
+  con un recorrido a mano: nada antes de su hora, 5 pasadas a la vez sobre
+  20 recordatorios (3 + 4 + 4 + 5 + 4 tratados; 21 peticiones con 20 claves
+  distintas, la de más es el reintento del 503 con la misma clave), envío
+  con el texto exacto, 503 y envío al minuto con `attempts` 2, y 422 →
+  `failed`. `scripts/smoke.sh` llega
   con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 8 usa
   `sendSeq` y `sentTo` para elegir la cita de una respuesta, y la 9 cuenta
   lo pendiente en la nota de producción.
