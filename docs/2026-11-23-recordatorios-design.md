@@ -1102,3 +1102,38 @@ Rama `docs/entrega`.
   reglas de código (sección 2 y «Reglas de código» de `AGENTS.md`, con
   resumen en `README.md` y `CLAUDE.md`); solo documentación. Siguiente paso:
   ola 1, tareas 2 y 4 en paralelo.
+- 2026-11-24: tarea 4 implementada en `feat/horario-recordatorio`. Entran
+  `src/domain/time-zones.ts` (`VIRTUAL_TIME_ZONE`, `effectiveTimeZone`,
+  `localDateTime`), `reminder-schedule.ts` (`QUIET_HOURS`, `ReminderPlan`,
+  `planReminder`) y `reminder-message.ts` (`buildReminderText`), con 22
+  unitarios. Cambios respecto al plan:
+  - `localDateTime` pasa un instante a la hora local y lanza un `Error` simple
+    si la zona no es válida; sin esa guarda Luxon devolvía una fecha inválida
+    y `too_late` sin avisar. No es un error propio porque `src/domain` no
+    puede importar `application` (`test/architecture.spec.ts`) y una zona
+    inválida es un fallo de programación: la valida la tarea 3 al crear la
+    clínica;
+  - tests añadidos a la tabla del plan: hora que no existe el día del cambio
+    de marzo, hora repetida el de octubre, franja que salta al día del cambio,
+    texto en Canarias, ceros a la izquierda y zona inválida;
+  - `isValidTimeZone` queda para la tarea 3;
+  - la tarea no mergea su PR: queda para revisión.
+
+  La revisión final de la rama no encontró nada grave. Queda para otro
+  cambio:
+  - `outOfQuietHours` supone una franja que cruza la medianoche
+    (`start > end`); una franja dentro del mismo día necesita otra condición;
+  - el mensaje de `localDateTime` habla de la zona aunque lo inválido sea la
+    fecha, y la guarda acepta `local` o `system` como zona: la tarea 3 debería
+    validar con `IANAZone.isValidZone`;
+  - faltan casos de «ya pasó» con `now` de madrugada y con milisegundos (el
+    comportamiento es correcto);
+  - `AGENTS.md` dice que `domain` lanza los errores de
+    `src/application/errors.ts`, pero `test/architecture.spec.ts` no le deja
+    importar `application`; y el plan pone `isValidTimeZone` junto a `Clinic`
+    mientras el mapa de `AGENTS.md` la sitúa en `time-zones.ts`.
+
+  Verificación: `npm run lint && npm run typecheck && npm test` en verde
+  (8 archivos, 37 tests); los e2e y `docker compose` los corre el CI.
+  Siguiente paso: revisar y mergear la PR; la tarea 5 consume `planReminder`,
+  `buildReminderText` y `effectiveTimeZone`.
