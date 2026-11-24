@@ -251,6 +251,20 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 - **Arquitectura de eventos (EventBridge, colas):** solo como propuesta en la
   nota de producción; el servicio entregado es una API REST con Postgres. Un
   `infra/` con Pulumi en TypeScript es opcional y solo al final.
+- **Reglas de código (2026-11-24):** SOLID con inyección de dependencias,
+  errores personalizados, `try/catch`, sin `any` y JSDoc en los métodos
+  públicos (sección «Reglas de código» de `AGENTS.md`). Se adaptan al stack:
+  - los errores personalizados son los de `src/application/errors.ts` y solo
+    `ErrorFilter` los traduce a HTTP, porque los casos de uso son clases sin
+    decoradores que no dependen de Nest y se prueban sin él;
+  - `try/catch` solo en los límites con E/S, donde un fallo externo se
+    convierte en un resultado tipado o en un error propio;
+  - los tests siguen en Vitest y no se migra a Jest: es el runner de la
+    plantilla de Nest 12 en ESM y tiene la misma API;
+  - JSDoc se exige al código nuevo y a los archivos que se tocan; lo que quede
+    sin documentar de la tarea 1 se repasa en la revisión previa a la tarea 9;
+  - el formato de respuesta de un chat (solo un bloque de código) no se adopta:
+    los agentes entregan en el repo, con `npm run verify` y PR.
 
 ## 3. Plan
 
@@ -1084,3 +1098,7 @@ Rama `docs/entrega`.
     `deploy` y las skills genéricas de `.claude/` y `.agents/`;
   - tests añadidos al brief: `loadConfig`, `TestClock` congelado y JSON mal
     formado → 400 `{ error }`.
+- 2026-11-24: tarea 1 mergeada (PR #1, `main` en `7812ae5`). Añadidas las
+  reglas de código (sección 2 y «Reglas de código» de `AGENTS.md`, con
+  resumen en `README.md` y `CLAUDE.md`); solo documentación. Siguiente paso:
+  ola 1, tareas 2 y 4 en paralelo.
