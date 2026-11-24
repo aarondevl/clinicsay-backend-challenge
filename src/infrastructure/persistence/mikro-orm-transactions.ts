@@ -6,6 +6,7 @@ import { Transactions } from '../../application/ports/transactions.js';
 import { isDatabaseUnavailable } from './database-unavailable.js';
 import { MikroOrmAppointmentRepository } from './repositories/appointment.repository.js';
 import { MikroOrmClinicRepository } from './repositories/clinic.repository.js';
+import { MikroOrmInboundMessageRepository } from './repositories/inbound-message.repository.js';
 import { MikroOrmPatientRepository } from './repositories/patient.repository.js';
 import { MikroOrmReminderRepository } from './repositories/reminder.repository.js';
 
@@ -47,5 +48,6 @@ function buildRepositories(tx: EntityManager): Repositories {
     patients: new MikroOrmPatientRepository(tx),
     appointments: new MikroOrmAppointmentRepository(tx),
     reminders: new MikroOrmReminderRepository(tx),
+    inboundMessages: new MikroOrmInboundMessageRepository(tx),
   };
 }
