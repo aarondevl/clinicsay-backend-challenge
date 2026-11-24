@@ -198,15 +198,44 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   reglas del enunciado y viven en el dominio y en Postgres, donde se pueden
   probar con el reloj de test.
 
+## Reglas de código
+
+Se aplican a todo código nuevo y a los archivos que un cambio toca.
+
+- **SOLID, con inyección de dependencias.** Una responsabilidad por archivo
+  (un caso de uso, una regla, un repositorio). Los casos de uso reciben sus
+  puertos por constructor y dependen de las clases abstractas de
+  `src/application/ports/`, nunca de una implementación; las implementaciones
+  se eligen solo en `app.module.ts`. Fuera de la composición y de los tests,
+  nada hace `new` de un repositorio, un cliente HTTP o un reloj.
+- **Errores propios, traducidos a HTTP en un solo sitio.** `domain` y
+  `application` lanzan errores tipados de `src/application/errors.ts`
+  (`ValidationError`, `NotFoundError`, `ConflictError`); si hace falta otro,
+  se añade ahí y se traduce en `ErrorFilter`. Solo `src/http` conoce los
+  códigos HTTP: los casos de uso no lanzan `HttpException` ni importan
+  `@nestjs/*`, para que se prueben sin Nest.
+- **`try/catch` en los límites con E/S** (proveedor, base de datos,
+  `/health`): convierte el fallo externo en un resultado tipado
+  (`ProviderResult`, 503) o en un error propio. Cada `catch` traduce, registra
+  o relanza; ninguno silencia.
+- **Sin `any` en ningún caso**, tampoco en tests ni como `as any`. Lo
+  desconocido es `unknown` y se estrecha. `as` solo para `as const` o en un
+  límite justificado con un comentario.
+- **JSDoc en cada método público y función exportada de `src/`**: qué hace,
+  `@param` cuando el nombre no basta y `@throws` con los errores propios que
+  puede lanzar. Dentro del cuerpo, comentarios solo donde el porqué no es
+  obvio (una regla del enunciado, una decisión de concurrencia, un borde de
+  zona horaria).
+- **Tests con Vitest**, no con Jest: la API es la misma (`describe`, `it`,
+  `expect`) y los mocks son `vi.fn()`. Si una petición o una skill pide un
+  ejemplo en Jest, se escribe en Vitest.
+
 ## Estilo
 
-- TypeScript estricto. Sin `any`; `as` solo para `as const` o en un límite
-  justificado con un comentario.
+- TypeScript estricto.
 - Toda promesa se espera (`typescript/no-floating-promises` es error).
 - Identificadores en inglés; README, documentos y commits en español; mensajes
   de error de la API en inglés y cortos.
-- Comentarios solo donde el porqué no es obvio (una regla del enunciado, una
-  decisión de concurrencia, un borde de zona horaria).
 - No se añaden dependencias sin explicar el motivo en la PR.
 
 ## Git y CI
