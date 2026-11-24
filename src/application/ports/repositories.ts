@@ -35,8 +35,19 @@ export abstract class AppointmentRepository {
    */
   abstract findById(id: string): Promise<Appointment | null>;
 
+  /**
+   * Como `findById`, pero bloquea la fila (`FOR UPDATE`) hasta el final de la
+   * transacción; si otra la tiene, espera y devuelve lo que esa confirmó. Se
+   * bloquea siempre la cita antes que sus recordatorios.
+   * @param id Un UUID (el caso de uso lo comprueba antes con `isId`).
+   */
+  abstract lockById(id: string): Promise<Appointment | null>;
+
   /** Guarda una cita nueva. */
   abstract insert(appointment: Appointment): Promise<void>;
+
+  /** Sobrescribe la cita guardada con ese id. */
+  abstract update(appointment: Appointment): Promise<void>;
 }
 
 /** Recordatorios guardados. */
@@ -48,8 +59,19 @@ export abstract class ReminderRepository {
    */
   abstract listByAppointment(appointmentId: string): Promise<Reminder[]>;
 
+  /**
+   * Devuelve los recordatorios `pending` de la cita y los bloquea
+   * (`FOR UPDATE`, sin `SKIP LOCKED`) hasta el final de la transacción. Si el
+   * job está enviando uno, espera a que termine y ya no lo devuelve si dejó de
+   * estar pendiente. Se llama después de bloquear la cita con `lockById`.
+   */
+  abstract lockPendingByAppointment(appointmentId: string): Promise<Reminder[]>;
+
   /** Guarda un recordatorio nuevo. */
   abstract insert(reminder: Reminder): Promise<void>;
+
+  /** Sobrescribe el recordatorio guardado con ese id. */
+  abstract update(reminder: Reminder): Promise<void>;
 }
 
 /** Repositorios ligados a una transacción; los entrega `Transactions.run`. */
