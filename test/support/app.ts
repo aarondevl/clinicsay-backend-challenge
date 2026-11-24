@@ -25,7 +25,7 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port: 0,
     databaseUrl:
       process.env.TEST_DATABASE_URL ??
-      'postgres://clinicsay:clinicsay@localhost:5432/clinicsay_test',
+      'postgres://clinicsay:clinicsay@localhost:55432/clinicsay_test',
     providerUrl: `http://localhost:${TEST_PROVIDER_PORT}`,
     clockMode: 'test',
     providerTimeoutMs: 5000,

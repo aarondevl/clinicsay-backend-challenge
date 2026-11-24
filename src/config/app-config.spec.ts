@@ -8,6 +8,13 @@ describe('loadConfig', () => {
     expect(config.clockMode).toBe('system');
   });
 
+  it('usa por defecto la base del compose en el puerto 55432 del host', () => {
+    // El compose no publica el 5432 para no chocar con un Postgres local.
+    expect(loadConfig({}).databaseUrl).toBe(
+      'postgres://clinicsay:clinicsay@localhost:55432/clinicsay',
+    );
+  });
+
   it('activa el reloj de pruebas solo con CLOCK_MODE=test', () => {
     expect(loadConfig({ CLOCK_MODE: 'test' }).clockMode).toBe('test');
     expect(loadConfig({ CLOCK_MODE: 'TEST' }).clockMode).toBe('system');
