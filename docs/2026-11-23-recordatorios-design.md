@@ -198,6 +198,9 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 - **Fechas en las respuestas:** UTC con `Z` y sin milisegundos cuando son cero
   (`2027-03-27T09:00:00Z`, como en el contrato).
 - **Fechas de entrada sin zona** (`2027-03-28T10:00:00`): 400.
+- **Zona de la clínica:** solo nombres IANA (`Europe/Madrid`, `Atlantic/Canary`).
+  `local`, `system` y los offsets fijos (`+01:00`) dan 400: los dos primeros
+  dependen de la máquina y un offset no tiene cambio de horario.
 - **Orden de las comprobaciones:** 400 de esquema, luego 404, luego 409 y al
   final 400 de negocio (paciente de otra clínica, `startsAt` no futura).
 
@@ -241,6 +244,16 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   parcial garantiza un solo recordatorio `pending` por cita.
 - **Reloj:** puerto `Clock`. Ninguna regla usa `new Date()`, `Date.now()` ni
   `now()` de Postgres para la hora de negocio.
+- **Ids (2026-11-24):** los genera el puerto `IdGenerator`, implementado con
+  UUIDv7 del paquete `uuid` en `src/infrastructure/ids/`. No es una función de
+  `src/domain` porque un UUIDv7 lee la hora del sistema y genera azar, y el
+  dominio solo tiene funciones puras. `isId` sí vive en el dominio: acepta la
+  forma canónica 8-4-4-4-12 en hexadecimal, que Postgres siempre puede
+  convertir a `uuid`, así que un id raro da 404 y nunca 500.
+- **Zonas válidas (2026-11-24):** `isValidTimeZone`, en
+  `src/domain/time-zones.ts`, usa `IANAZone.isValidZone` de Luxon y rechaza
+  además los offsets fijos, que Intl acepta como zona. La comprueba
+  `CreateClinic`, que lanza `ValidationError`.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
