@@ -252,6 +252,46 @@ describe('job de envío', () => {
       expect(await t.provider.requests(PHONE)).toHaveLength(1);
     });
 
+    it('cada envío guarda sentTo y un sendSeq mayor que el anterior, en el orden en que salen', async () => {
+      // Dos pacientes con el mismo teléfono: la respuesta irá al último envío.
+      const clinic = await createClinic(t);
+      const first = await madridAppointment({ clinic });
+      const second = await madridAppointment({ clinic });
+      await t.setClock(T);
+      expect(await runJob()).toEqual({ processed: 2 });
+      const [a, b] = await Promise.all(
+        [first, second].map(async (appointment) => {
+          const [stored] = await transactions.run((repos) =>
+            repos.reminders.listByAppointment(appointment.id),
+          );
+          return stored;
+        }),
+      );
+      expect(a).toMatchObject({ status: 'sent', sentTo: PHONE });
+      expect(b).toMatchObject({ status: 'sent', sentTo: PHONE });
+      expect(b?.sendSeq).toBeGreaterThan(a?.sendSeq ?? Infinity);
+    });
+
+    it('no espera el bloqueo de la cita: con un PATCH que la tiene bloqueada, envía sin deadlock', async () => {
+      const created = await madridAppointment();
+      await t.setClock(T);
+      // Hace de PATCH: ya bloqueó la cita y después irá a por sus pendientes.
+      const patch = await holdLock(
+        transactions,
+        (repos) => repos.appointments.lockById(created.id),
+        async (repos) => {
+          await repos.reminders.lockPendingByAppointment(created.id);
+        },
+      );
+      try {
+        expect(await within(2000, runJob())).toEqual({ processed: 1 });
+      } finally {
+        patch.release();
+        await patch.done;
+      }
+      expect(await onlyReminder(created.id)).toMatchObject({ status: 'sent' });
+    });
+
     it('trata los recordatorios de todas las clínicas, cada uno con la hora de su zona', async () => {
       const madrid = await madridAppointment();
       const canary = await createClinic(t, {
@@ -584,6 +624,28 @@ describe('job de envío', () => {
       expect(await t.provider.requests(PHONE)).toEqual([
         { idempotencyKey: reminder.id, status: 202 },
         { idempotencyKey: reminder.id, status: 200 },
+      ]);
+    });
+
+    it('un PATCH que llega mientras el job espera al proveedor espera y ve el estado final', async () => {
+      await slow.setClock(NOW);
+      const created = await madridAppointment({ app: slow });
+      await slow.setClock(T);
+      proxy.dropResponses(true);
+      const job = runJob(slow);
+      // El job tiene el recordatorio bloqueado y espera la respuesta.
+      await until(async () => (await t.provider.requests(PHONE)).length > 0);
+      const patched = await slow.http
+        .patch(`/appointments/${created.id}`)
+        .send({ startsAt: '2027-03-29T08:00:00Z' });
+      expect(await job).toEqual({ processed: 1 });
+      expect(patched.status).toBe(200);
+      // El PATCH canceló el pendiente con el intento que guardó el job.
+      // Límite con supertest: el cuerpo llega sin tipo y el 200 garantiza su forma.
+      const reminders = (patched.body as AppointmentBody).reminders;
+      expect(reminders.map((r) => [r.status, r.attempts])).toEqual([
+        ['cancelled', 1],
+        ['pending', 0],
       ]);
     });
   });
