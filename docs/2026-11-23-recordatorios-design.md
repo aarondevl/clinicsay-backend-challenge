@@ -324,6 +324,26 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     2 recordatorios en vez de 1). Node ya espera a las peticiones HTTP en
     curso y el pool de `pg` a que la transacción suelte su conexión, pero el
     coordinador no depende de esos detalles.
+- **Webhook (2026-11-24):**
+  - una transacción por mensaje. Primero `insertIfNew` (`insert ... on
+    conflict do nothing`): el `messageId` queda registrado junto con su
+    efecto, y uno repetido no hace nada aunque la primera vez se ignorara.
+    Después `parseReply` y, si es SI o NO, la búsqueda de la cita;
+  - la cita sale de una sola consulta: recordatorio `sent` con `sent_to`
+    igual a `from`, cita sin cancelar y con `starts_at` posterior a la hora
+    del servicio, ordenado por `send_seq` descendente, `limit 1` y `FOR
+    UPDATE OF` la cita. Si otra transacción tiene la cita, se espera; al
+    confirmar, Postgres vuelve a evaluar la consulta con la fila nueva y, si
+    ya no cumple (la cancelaron o ya empezó), pasa a la anterior que cumpla.
+    El resultado es el mismo que si la otra transacción hubiera llegado
+    antes. El caso de uso vuelve a comprobar `canReceiveReply` con la fila
+    bloqueada, aunque con esta consulta nunca llega a descartar nada;
+  - «no ha empezado» se mira con `Clock`. `receivedAt` solo se guarda;
+  - NO bloquea los pendientes después de la cita, como cancelar: si el job
+    está enviando uno, espera y, si queda `sent`, ya no lo cancela;
+  - `from` no se valida como E.164: un teléfono sin envíos no encuentra cita
+    y responde 200. El 200 va sin cuerpo, porque el contrato no define
+    ninguno.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
