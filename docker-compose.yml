@@ -1,5 +1,5 @@
-# Añade aquí tu servicio `api` (puerto 3000, CLOCK_MODE=test, PROVIDER_URL=http://provider:4010)
-# y su base de datos. El servicio `provider` no se modifica.
+# `api` (puerto 3000, CLOCK_MODE=test) con su Postgres. El servicio `provider`
+# es el de la prueba y no se modifica.
 services:
   provider:
     build: ./provider
@@ -20,3 +20,16 @@ services:
       timeout: 3s
       retries: 30
 
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      CLOCK_MODE: test
+      PROVIDER_URL: http://provider:4010
+      DATABASE_URL: postgres://clinicsay:clinicsay@db:5432/clinicsay
+    depends_on:
+      db:
+        condition: service_healthy
+      provider:
+        condition: service_started

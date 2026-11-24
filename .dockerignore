@@ -1,0 +1,15 @@
+.git
+.github
+.superpowers
+.worktrees
+.claude
+node_modules
+dist
+coverage
+*.tsbuildinfo
+.env
+.env.*
+docs
+test
+provider
+enunciado.pdf
