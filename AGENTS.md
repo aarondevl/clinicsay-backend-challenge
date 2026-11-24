@@ -69,7 +69,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
 | Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
-| Transiciones de cita y recordatorio (reprogramar, cancelar, `too_late`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | sus `*.spec.ts` |
+| Transiciones de cita y recordatorio (reprogramar, cancelar, `too_late` al crear con `newReminder`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `reminder.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
@@ -77,8 +77,10 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Webhook (deduplicación, cita destino) | `src/application/inbound/handle-inbound-message.ts` | `test/webhook.e2e-spec.ts` |
 | Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
-| Formato de errores y validación | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
+| Formato de errores y validación (fechas de entrada: `IsIsoDateTimeWithZone` y `parseIsoDateTimeWithZone`) | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
+| Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
+| Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 | Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
@@ -136,7 +138,12 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   modo y fija la hora a través del puerto `SettableClock`.
 - **Fechas:** se guardan en `timestamptz` y salen en UTC con `Z` por
   `toApiDate`, sin milisegundos si son cero (`2027-03-27T09:00:00Z`). Una
-  entrada sin zona es 400. La hora local se calcula con Luxon y la zona IANA.
+  entrada sin zona es 400, y también la que no tiene la forma `date-time` del
+  contrato (solo la hora, fecha ordinal o de semana, año de 5 cifras, offset
+  de más de 23:59): Luxon completaría lo que falta con la fecha del sistema,
+  no con la del `Clock`. La valida `@IsIsoDateTimeWithZone()` y la convierte
+  `parseIsoDateTimeWithZone`. La hora local se calcula con Luxon y la zona
+  IANA.
 - **Errores:** siempre `{ "error": "<mensaje>" }`. Orden: esquema (400) →
   existencia (404) → estado (409) → regla de negocio (400).
 - **Ids:** un id que no es UUID, en la ruta o en el cuerpo, es 404, igual que

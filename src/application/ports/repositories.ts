@@ -1,5 +1,7 @@
+import type { Appointment } from '../../domain/appointment.js';
 import type { Clinic } from '../../domain/clinic.js';
 import type { Patient } from '../../domain/patient.js';
+import type { Reminder } from '../../domain/reminder.js';
 
 /** Clínicas guardadas. */
 export abstract class ClinicRepository {
@@ -25,8 +27,35 @@ export abstract class PatientRepository {
   abstract insert(patient: Patient): Promise<void>;
 }
 
+/** Citas guardadas. */
+export abstract class AppointmentRepository {
+  /**
+   * Devuelve la cita con ese id, o `null` si no existe.
+   * @param id Un UUID (el caso de uso lo comprueba antes con `isId`).
+   */
+  abstract findById(id: string): Promise<Appointment | null>;
+
+  /** Guarda una cita nueva. */
+  abstract insert(appointment: Appointment): Promise<void>;
+}
+
+/** Recordatorios guardados. */
+export abstract class ReminderRepository {
+  /**
+   * Devuelve todos los recordatorios de una cita, ordenados por id ascendente:
+   * los ids crecen con cada creación y las fechas empatan con el reloj
+   * congelado.
+   */
+  abstract listByAppointment(appointmentId: string): Promise<Reminder[]>;
+
+  /** Guarda un recordatorio nuevo. */
+  abstract insert(reminder: Reminder): Promise<void>;
+}
+
 /** Repositorios ligados a una transacción; los entrega `Transactions.run`. */
 export interface Repositories {
   clinics: ClinicRepository;
   patients: PatientRepository;
+  appointments: AppointmentRepository;
+  reminders: ReminderRepository;
 }

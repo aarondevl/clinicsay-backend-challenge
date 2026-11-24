@@ -1,11 +1,14 @@
 import { MikroORM } from '@mikro-orm/postgresql';
 import { type DynamicModule, Module, type Provider } from '@nestjs/common';
+import { CreateAppointment } from './application/appointments/create-appointment.js';
+import { GetAppointment } from './application/appointments/get-appointment.js';
 import { CreateClinic } from './application/clinics/create-clinic.js';
 import { CreatePatient } from './application/patients/create-patient.js';
 import { Clock, SettableClock } from './application/ports/clock.js';
 import { IdGenerator } from './application/ports/id-generator.js';
 import { Transactions } from './application/ports/transactions.js';
 import type { AppConfig } from './config/app-config.js';
+import { AppointmentsController } from './http/appointments.controller.js';
 import { ClinicsController } from './http/clinics.controller.js';
 import { PatientsController } from './http/patients.controller.js';
 import { TestClockController } from './http/test-clock.controller.js';
@@ -41,6 +44,18 @@ const useCaseProviders: Provider[] = [
       new CreatePatient(transactions, ids),
     inject: [Transactions, IdGenerator],
   },
+  {
+    provide: CreateAppointment,
+    useFactory: (transactions: Transactions, ids: IdGenerator, clock: Clock) =>
+      new CreateAppointment(transactions, ids, clock),
+    inject: [Transactions, IdGenerator, Clock],
+  },
+  {
+    provide: GetAppointment,
+    useFactory: (transactions: Transactions) =>
+      new GetAppointment(transactions),
+    inject: [Transactions],
+  },
 ];
 
 /** Composición de la app: aquí se eligen las implementaciones de los puertos. */
@@ -65,6 +80,7 @@ export class AppModule {
       controllers: [
         ClinicsController,
         PatientsController,
+        AppointmentsController,
         ...(testMode ? [TestClockController] : []),
       ],
       providers: [
