@@ -1,6 +1,7 @@
 import {
   type Appointment,
   cancelAppointment,
+  canReceiveReply,
   confirmAppointment,
   hasStarted,
   rescheduleAppointment,
@@ -79,4 +80,25 @@ describe('confirmAppointment', () => {
       });
     },
   );
+});
+
+describe('canReceiveReply', () => {
+  const now = new Date('2027-03-28T07:59:59Z');
+
+  it.each(['scheduled', 'confirmed'] as const)(
+    'una cita %s que no ha empezado puede recibir la respuesta',
+    (status) => {
+      expect(canReceiveReply({ ...scheduled(), status }, now)).toBe(true);
+    },
+  );
+
+  it('una cita cancelada no la recibe aunque no haya empezado', () => {
+    const cancelled: Appointment = { ...scheduled(), status: 'cancelled' };
+    expect(canReceiveReply(cancelled, now)).toBe(false);
+  });
+
+  it('una cita que empieza justo ahora ya no la recibe', () => {
+    const startsAt = new Date('2027-03-28T07:59:59Z');
+    expect(canReceiveReply({ ...scheduled(), startsAt }, now)).toBe(false);
+  });
 });
