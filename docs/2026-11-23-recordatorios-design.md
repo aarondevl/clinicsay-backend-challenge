@@ -261,6 +261,15 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   confundir un `fetch` fallido con la base, y deja fuera `08P01`, que también
   lo provoca un dato con NUL. Lo demás sigue siendo 500: un 503 indica al
   cliente que reintente y solo es cierto si la base no responde.
+- **Fechas de entrada (2026-11-24):** `@IsIsoDateTimeWithZone()` exige la
+  forma `date-time` del contrato (RFC 3339, con los segundos opcionales):
+  fecha completa con año de 4 cifras, hora 00-23 y zona `Z` u offset de
+  ±23:59 como mucho; Luxon comprueba además que el día exista. El resto de lo
+  que Luxon entiende como ISO 8601 es 400: con solo una hora completaría la
+  fecha con la del sistema y no con la del reloj del servicio, a un mes sin
+  día le pondría el 1, y un año de 5 cifras acababa en 500.
+  `parseIsoDateTimeWithZone`, en el mismo archivo, convierte con el mismo
+  parser y lanza en vez de completar una fecha.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
@@ -1255,3 +1264,67 @@ Rama `docs/entrega`.
   `docker compose -p clinicsay up --build -d --wait` con un recorrido a mano
   de las dos rutas. Siguiente paso: revisar y mergear la PR; la tarea 5
   consume `Transactions`, `IdGenerator`, `isId` y los fixtures.
+- 2026-11-24: tarea 5 implementada en `feat/citas`. Entran
+  `POST /appointments` y `GET /appointments/{id}` con sus casos de uso
+  (`CreateAppointment`, `GetAppointment`) y `AppointmentView`, los tipos
+  `Appointment` y `Reminder` con `newReminder`, los puertos
+  `AppointmentRepository` y `ReminderRepository` con sus repositorios de
+  MikroORM, `presentAppointment`, `CreateAppointmentDto`,
+  `parseIsoDateTimeWithZone`, el fixture `createAppointment` y
+  `test/appointments.e2e-spec.ts`. Sin migraciones ni dependencias nuevas.
+  Cambios respecto al plan:
+  - los ids salen del puerto `IdGenerator`, que `CreateAppointment` recibe
+    junto a `Transactions` y `Clock`; `newId()` no existe;
+  - `AppointmentRepository.lockById`/`update` y `ReminderRepository.update`
+    no entran, porque ningún test de esta tarea los usa. La tarea 6 los
+    añade con sus tests y tiene que tocar también `appointment.repository.ts`,
+    que su lista de archivos no incluye;
+  - `src/domain/appointment.ts` solo tiene tipos y no hay
+    `appointment.spec.ts`: las transiciones de cita llegan con la tarea 6;
+  - `startsAt` se convierte con `parseIsoDateTimeWithZone` y el validador
+    exige la forma `date-time` del contrato (sección 2, «Fechas de entrada»);
+  - `virtual: null` cuenta como ausente (`false`), igual que `phone`;
+  - tests añadidos al brief: hora de envío ya pasada con el reloj,
+    `virtual: false`, `startsAt` igual a la hora del servicio, otros 400 de
+    esquema, ids que no son UUID en el cuerpo, 400 antes que 404, 404 antes
+    que 400, `startsAt` sin fecha con el reloj en el pasado y el repositorio
+    de recordatorios (orden por id e ida y vuelta de todos los campos).
+
+  La revisión final de la rama encontró un problema importante, arreglado en
+  la misma rama: `isIsoDateTimeWithZone` (de la tarea 1) aceptaba cualquier
+  forma ISO 8601 de Luxon. Con `startsAt: "10:00:00Z"` creaba la cita con la
+  fecha del sistema y no con la del reloj, un mes sin día caía en el día 1,
+  `+99:00` se aceptaba y un año de 5 cifras daba 500. Ahora es 400. Queda
+  para otro cambio:
+  - `CreateAppointment` comprueba `isId` dentro de la transacción y
+    `CreatePatient` y `GetAppointment` antes; con la base caída, `clinicId`
+    `x` da 503 en vez de 404;
+  - `GET /appointments/{id}` lee la cita y sus recordatorios en dos
+    sentencias con READ COMMITTED: un `PATCH` concurrente (tarea 6) podría
+    mostrar una vez un estado mezclado;
+  - `POST /appointments` no es idempotente (el contrato no tiene clave);
+  - `z` minúscula y offsets sin dos puntos (`+0200`) dan 400.
+
+  Cada test nuevo se vio fallar por su motivo. Los e2e fallaron uno a uno
+  por su aserción antes de existir la ruta, y además con una mutación
+  temporal cada uno: quitar `isId` (500), `toISOString()` en el presentador,
+  `virtual` siempre presente, la zona de la clínica en vez de la efectiva,
+  la hora del sistema en vez de `Clock`, `<` en vez de `<=`, quitar la
+  comprobación de clínica del paciente, la regla de `startsAt` antes de las
+  búsquedas, quitar cada decorador del DTO, quitar el `orderBy` o el
+  `nextAttemptAt` del repositorio, el GET sin recordatorios, quitar cada 404
+  e ignorar `too_late`. Los unitarios de `newReminder` y de
+  `parseIsoDateTimeWithZone`, con mutaciones de una línea. Los dos tests que
+  pasaban desde el principio («acepta una fecha con milisegundos / sin
+  segundos») fijan lo que la regex no debe endurecer; caen al hacer
+  obligatorios los segundos o al quitar la fracción.
+
+  Verificación: `npm run verify` en verde (13 archivos y 99 unitarios,
+  5 archivos y 60 e2e) y `docker compose -p clinicsay up --build -d --wait`
+  con un recorrido a mano: `POST` 201, `GET` 200 con la misma cita,
+  `virtual: true` solo en la virtual, `GET /appointments/abc` 404,
+  `clinicId` `x` 404, `startsAt` `10:00:00Z` 400 y `startsAt` pasada 400.
+  `scripts/smoke.sh` llega con la tarea 9. Siguiente paso: revisar y mergear
+  la PR; la tarea 6 consume `Appointment`, `Reminder`, `newReminder`, los dos
+  repositorios, `AppointmentView`, `presentAppointment` y
+  `parseIsoDateTimeWithZone`.
