@@ -1352,3 +1352,71 @@ Rama `docs/entrega`.
   la PR; la tarea 6 consume `Appointment`, `Reminder`, `newReminder`, los dos
   repositorios, `AppointmentView`, `presentAppointment` y
   `parseIsoDateTimeWithZone`.
+- 2026-11-24: tarea 6 implementada en `feat/reprogramar-cancelar`. Entran
+  `PATCH /appointments/{id}` y `POST /appointments/{id}/cancel` con sus
+  casos de uso (`RescheduleAppointment`, `CancelAppointment`),
+  `RescheduleAppointmentDto`, las transiciones `hasStarted`,
+  `rescheduleAppointment`, `cancelAppointment`, `confirmAppointment` y
+  `cancelReminder`, `AppointmentRepository.lockById`/`update`,
+  `ReminderRepository.lockPendingByAppointment`/`update` y
+  `test/reschedule-cancel.e2e-spec.ts`. Sin migraciones ni dependencias
+  nuevas. Cambios respecto al plan:
+  - se modifica también `appointment.repository.ts` (`lockById` y `update`
+    no entraron en la tarea 5);
+  - `RescheduleAppointment` recibe `Transactions`, `IdGenerator` y `Clock`;
+    los ids salen del puerto, no de `newId()`;
+  - los dos casos de uso comprueban `isId` antes de abrir la transacción, y
+    `PATCH` mira cancelada o empezada (409) y `startsAt` (400) antes de
+    bloquear los pendientes, no después: no dependen de ellos y así un
+    error no espera al job;
+  - las lecturas de los repositorios de citas y recordatorios no usan el
+    identity map (sección 2): dentro de una transacción, una lectura tras un
+    `update` devolvía la fila vieja (reproducido en dos tests);
+  - cancelar una cita que ya empezó responde 200 y la cancela, y
+    `confirmAppointment` entra ya aunque solo lo use la tarea 8;
+  - tests añadidos al brief: los bloqueos con dos transacciones reales,
+    lecturas tras `update` en la misma transacción, tres `PATCH` a la vez,
+    cancelar con un `PATCH` esperando al job, cita virtual, `too_late` al
+    reprogramar, 409 antes que 400, 400 antes que 404 y los 400 de esquema.
+
+  La revisión final de la rama no encontró nada crítico. Se arregló en la
+  misma rama: faltaba un test que fallara si cancelar no bloquea la cita
+  (con la mutación se perdía la hora nueva del `PATCH` y quedaba un
+  pendiente en la cita cancelada), la regla de bloqueo no aclaraba que el
+  job no puede esperar la cita con un recordatorio bloqueado (deadlock
+  `40P01`), y unos `as` de los tests no tenían el comentario de límite.
+  Queda para otro cambio:
+  - el test de Review Focus 3 no distingue el orden por id del orden por
+    `scheduledFor`, porque las horas crecen (lo detectan otros tres tests);
+  - el JSDoc de `update` en los puertos no dice que hay que llamarlo con la
+    fila bloqueada;
+  - un `PATCH` con el mismo `startsAt` desconfirma la cita y crea otro
+    recordatorio (lectura literal de la regla 8); falta decidirlo;
+  - `holdLock` podría tipar `repos` como `Repositories`, y
+    `disableIdentityMap` podría ir en `createOrmConfig` en vez de en cada
+    repositorio.
+
+  Cada test nuevo se vio fallar por su motivo: los unitarios con la función
+  ausente y con una mutación de una línea cada uno; los de repositorio con
+  el método ausente, con datos viejos del identity map y con 7 mutaciones
+  (sin `FOR UPDATE`, con `SKIP LOCKED`, sin filtrar `pending`, columnas
+  fuera del `update`); los de `PATCH` y cancelar con la ruta ausente y con
+  20 mutaciones (sin bloqueo, sin cancelar el pendiente, sin cada 409, 400
+  antes que 409, `<` en vez de `<=`, zona de la clínica en vez de la
+  efectiva, hora del sistema, sin `isId`, sin `@HttpCode(200)`, sin el
+  validador del DTO, entre otras). Sin `lockById`, tres `PATCH` a la vez
+  daban `[200, 200, 500]` por `reminder_one_pending` (4 de 4 veces), y
+  cancelar sin bloqueo perdía la hora nueva (3 de 3). La excepción es «ya
+  cancelada → sin escribir», que no se distingue desde fuera de reescribir
+  lo mismo: solo se prueba que la respuesta repetida es igual.
+
+  Verificación: `npm run verify` en verde (14 archivos y 116 unitarios,
+  6 archivos y 97 e2e) y `docker compose -p clinicsay up --build -d --wait`
+  con un recorrido a mano: `PATCH` 200 dos veces con
+  `[cancelled, cancelled, pending]`, 400 sin zona y con fecha pasada, 404
+  con `abc`, cancelar 200 dos veces con el mismo cuerpo, `PATCH` de la
+  cancelada 409 y `GET` igual que la última respuesta. `scripts/smoke.sh`
+  llega con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 7
+  añade «reprogramar después de enviado» y usa `ReminderRepository.update`;
+  la tarea 8 usa `confirmAppointment`, `cancelAppointment`, `cancelReminder`
+  y el orden cita → pendientes.
