@@ -152,6 +152,14 @@ describe('citas', () => {
       ['clinicId ausente', { clinicId: undefined }],
       ['patientId que no es texto', { patientId: 7 }],
       ['virtual como texto', { virtual: 'true' }],
+      [
+        'startsAt con un offset imposible',
+        { startsAt: '2027-03-28T10:00:00+99:00' },
+      ],
+      [
+        'startsAt con un año de 5 cifras',
+        { startsAt: '+010000-01-01T00:00:00Z' },
+      ],
     ])('con %s responde 400 { error }', async (_label, over) => {
       const { clinic, patient } = await madridPatient();
       const res = await t.http.post('/appointments').send({
@@ -162,6 +170,21 @@ describe('citas', () => {
       });
       expect(res.status).toBe(400);
       expect(Object.keys(res.body)).toEqual(['error']);
+    });
+
+    it('con startsAt sin fecha responde 400 en vez de usar la fecha del sistema', async () => {
+      const { clinic, patient } = await madridPatient();
+      // Con el reloj en el pasado, «hoy a las 10:00» del sistema sería futura.
+      await t.setClock('2000-01-01T00:00:00Z');
+      const res = await t.http.post('/appointments').send({
+        clinicId: clinic.id,
+        patientId: patient.id,
+        startsAt: '10:00:00Z',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'startsAt must be an ISO 8601 date-time with a time zone',
+      });
     });
 
     it.each([
