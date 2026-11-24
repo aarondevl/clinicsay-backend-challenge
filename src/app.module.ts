@@ -1,12 +1,47 @@
+import { MikroORM } from '@mikro-orm/postgresql';
 import { type DynamicModule, Module, type Provider } from '@nestjs/common';
+import { CreateClinic } from './application/clinics/create-clinic.js';
+import { CreatePatient } from './application/patients/create-patient.js';
 import { Clock, SettableClock } from './application/ports/clock.js';
+import { IdGenerator } from './application/ports/id-generator.js';
+import { Transactions } from './application/ports/transactions.js';
 import type { AppConfig } from './config/app-config.js';
+import { ClinicsController } from './http/clinics.controller.js';
+import { PatientsController } from './http/patients.controller.js';
 import { TestClockController } from './http/test-clock.controller.js';
 import { SystemClock } from './infrastructure/clock/system-clock.js';
 import { TestClock } from './infrastructure/clock/test-clock.js';
+import { UuidV7IdGenerator } from './infrastructure/ids/uuid-v7-id-generator.js';
+import { MikroOrmTransactions } from './infrastructure/persistence/mikro-orm-transactions.js';
 import { PersistenceModule } from './infrastructure/persistence/persistence.module.js';
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
+
+/** Puertos de `application` con la implementación que usa la app. */
+const portProviders: Provider[] = [
+  { provide: IdGenerator, useValue: new UuidV7IdGenerator() },
+  {
+    provide: Transactions,
+    useFactory: (orm: MikroORM) => new MikroOrmTransactions(orm),
+    inject: [MikroORM],
+  },
+];
+
+/** Casos de uso: clases sin decoradores que reciben sus puertos. */
+const useCaseProviders: Provider[] = [
+  {
+    provide: CreateClinic,
+    useFactory: (transactions: Transactions, ids: IdGenerator) =>
+      new CreateClinic(transactions, ids),
+    inject: [Transactions, IdGenerator],
+  },
+  {
+    provide: CreatePatient,
+    useFactory: (transactions: Transactions, ids: IdGenerator) =>
+      new CreatePatient(transactions, ids),
+    inject: [Transactions, IdGenerator],
+  },
+];
 
 /** Composición de la app: aquí se eligen las implementaciones de los puertos. */
 @Module({})
@@ -27,8 +62,17 @@ export class AppModule {
     return {
       module: AppModule,
       imports: [PersistenceModule.forRoot(config)],
-      controllers: testMode ? [TestClockController] : [],
-      providers: [{ provide: APP_CONFIG, useValue: config }, ...clockProviders],
+      controllers: [
+        ClinicsController,
+        PatientsController,
+        ...(testMode ? [TestClockController] : []),
+      ],
+      providers: [
+        { provide: APP_CONFIG, useValue: config },
+        ...clockProviders,
+        ...portProviders,
+        ...useCaseProviders,
+      ],
     };
   }
 }
