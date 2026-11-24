@@ -26,12 +26,14 @@ describe('classifyProviderResult', () => {
     expect(classifyProviderResult(result)).toBe(outcome);
   });
 
-  // Fuera de la tabla del enunciado. Reintentar con la misma clave es seguro:
-  // si ya se entregó, el proveedor responde 200 y queda `sent`.
-  it.each([201, 204, 302, 399, 600])(
-    'un %s que el enunciado no contempla se reintenta',
-    (status) => {
-      expect(classifyProviderResult(response(status))).toBe('retry');
-    },
-  );
+  // Fuera de la tabla del enunciado. Cualquier 2xx es un éxito HTTP: un
+  // proveedor real que acepte con 201 o 204 no debe acabar en `failed`.
+  it.each([201, 204, 299])('un %s también es entregado', (status) => {
+    expect(classifyProviderResult(response(status))).toBe('delivered');
+  });
+
+  // Lo que no es éxito ni 4xx se reintenta: con la misma clave es seguro.
+  it.each([100, 199, 302, 399, 600])('un %s se reintenta', (status) => {
+    expect(classifyProviderResult(response(status))).toBe('retry');
+  });
 });
