@@ -17,6 +17,22 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: clinicsay
+          POSTGRES_PASSWORD: clinicsay
+          POSTGRES_DB: clinicsay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U clinicsay -d clinicsay_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://clinicsay:clinicsay@localhost:5432/clinicsay_test
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -29,3 +45,18 @@ jobs:
       - run: npm test
       - run: npm run test:e2e
       - run: npm run build
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose up --build -d --wait --wait-timeout 180
+      - name: GET /health responde 200
+        run: test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/health)" = 200
+      - name: Logs del compose
+        if: failure()
+        run: docker compose logs
+      - name: Bajar el compose
+        if: always()
+        run: docker compose down -v

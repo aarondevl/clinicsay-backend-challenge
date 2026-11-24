@@ -1,7 +1,40 @@
-# Añade aquí tu servicio `api` (puerto 3000, CLOCK_MODE=test, PROVIDER_URL=http://provider:4010)
-# y su base de datos. El servicio `provider` no se modifica.
+# `api` (puerto 3000, CLOCK_MODE=test) con su Postgres. El servicio `provider`
+# es el de la prueba y no se modifica.
 services:
   provider:
     build: ./provider
     ports:
       - "4010:4010"
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: clinicsay
+      POSTGRES_PASSWORD: clinicsay
+      POSTGRES_DB: clinicsay
+    # Solo para los e2e y el desarrollo local; la api llega por la red del
+    # compose. 55432 para no chocar con un Postgres local en el 5432.
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      # Por TCP: durante la primera inicialización la imagen levanta un
+      # servidor temporal que solo escucha en el socket unix.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U clinicsay -d clinicsay"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    restart: on-failure
+    ports:
+      - "3000:3000"
+    environment:
+      CLOCK_MODE: test
+      PROVIDER_URL: http://provider:4010
+      DATABASE_URL: postgres://clinicsay:clinicsay@db:5432/clinicsay
+    depends_on:
+      db:
+        condition: service_healthy
+      provider:
+        condition: service_started

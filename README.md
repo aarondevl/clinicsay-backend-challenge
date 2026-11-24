@@ -13,7 +13,8 @@ El detalle está en [`AGENTS.md`](AGENTS.md#reglas-de-código); en resumen:
 - SOLID con inyección de dependencias: los casos de uso dependen de puertos
   (clases abstractas) y las implementaciones se cablean en `app.module.ts`.
 - Errores propios (`ValidationError`, `NotFoundError`, `ConflictError`) en
-  los casos de uso; solo la capa HTTP los traduce a 400, 404 y 409 con
+  los casos de uso, y `ServiceUnavailableError` en `/health` cuando la base no
+  responde; solo la capa HTTP los traduce a 400, 404, 409 y 503 con
   `{ "error": "<mensaje>" }`. El dominio devuelve resultados y no lanza
   errores de la API. `try/catch` en los límites con E/S.
 - TypeScript estricto sin `any`.
