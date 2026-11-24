@@ -5,6 +5,7 @@ import { CreateAppointment } from './application/appointments/create-appointment
 import { GetAppointment } from './application/appointments/get-appointment.js';
 import { RescheduleAppointment } from './application/appointments/reschedule-appointment.js';
 import { CreateClinic } from './application/clinics/create-clinic.js';
+import { HandleInboundMessage } from './application/inbound/handle-inbound-message.js';
 import { CreatePatient } from './application/patients/create-patient.js';
 import { Clock, SettableClock } from './application/ports/clock.js';
 import { IdGenerator } from './application/ports/id-generator.js';
@@ -18,6 +19,7 @@ import { JobsController } from './http/jobs.controller.js';
 import { PatientsController } from './http/patients.controller.js';
 import { ShutdownCoordinator } from './http/shutdown-coordinator.js';
 import { TestClockController } from './http/test-clock.controller.js';
+import { WebhooksController } from './http/webhooks.controller.js';
 import { SystemClock } from './infrastructure/clock/system-clock.js';
 import { TestClock } from './infrastructure/clock/test-clock.js';
 import { UuidV7IdGenerator } from './infrastructure/ids/uuid-v7-id-generator.js';
@@ -90,6 +92,12 @@ const useCaseProviders: Provider[] = [
     ) => new RunReminderPass(transactions, clock, provider),
     inject: [Transactions, Clock, MessageProvider],
   },
+  {
+    provide: HandleInboundMessage,
+    useFactory: (transactions: Transactions, clock: Clock) =>
+      new HandleInboundMessage(transactions, clock),
+    inject: [Transactions, Clock],
+  },
 ];
 
 /** Composición de la app: aquí se eligen las implementaciones de los puertos. */
@@ -116,6 +124,7 @@ export class AppModule {
         PatientsController,
         AppointmentsController,
         JobsController,
+        WebhooksController,
         ...(testMode ? [TestClockController] : []),
       ],
       providers: [
