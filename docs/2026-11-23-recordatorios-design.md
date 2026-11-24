@@ -1,0 +1,1086 @@
+# Recordatorios de citas por SMS
+
+Fuente de verdad: `enunciado.pdf` y `openapi.yaml`. Este documento resume lo que
+pide el enunciado y guarda las decisiones; ante cualquier duda manda el PDF.
+
+## 1. Pedido (2026-11-23)
+
+Servicio que crea, reprograma y cancela citas de clínicas y envía un recordatorio
+por mensaje a cada paciente el día anterior a través de un proveedor externo
+(simulado en `provider/`). El paciente responde SI o NO y la cita se confirma o
+se cancela.
+
+### Restricciones fijas
+
+- Node 22 o superior, TypeScript y PostgreSQL. Framework, librerías y estructura
+  son libres.
+- `docker compose up --build` levanta `api` en el puerto 3000 con
+  `CLOCK_MODE=test` y `PROVIDER_URL=http://provider:4010`, su base de datos y el
+  `provider`. El servicio `provider` no se modifica.
+- Migraciones al arrancar. `GET /health` responde 200 cuando la base está
+  conectada y migrada.
+- No hace falta autenticación, front, editar clínicas o pacientes, paginación ni
+  un proveedor real. Tampoco datos de ejemplo: la evaluación usa tests ocultos
+  contra el contrato (rutas, campos, estados y códigos).
+- Está pensada para 3-4 h. Lo que no se haga se cuenta en el README con el porqué.
+
+### Reloj
+
+- Con `CLOCK_MODE=test`, `PUT /test/clock { now }` (responde 204) fija la hora
+  que el servicio usa para todo: crear y reprogramar citas, las pasadas del job y
+  los webhooks. Sin ese modo el endpoint no existe (404).
+- Consecuencia: ninguna regla de negocio puede usar `now()` de Postgres ni
+  `Date.now()` directamente; la hora llega siempre desde el reloj del servicio.
+
+### Contrato (`openapi.yaml`)
+
+- Fechas de entrada en ISO 8601 con zona (`Z` u offset); en las respuestas,
+  siempre UTC con `Z`. Errores: `{ "error": "<mensaje>" }`.
+- `POST /clinics` → 201. 400 si faltan datos o la zona IANA no existe.
+- `POST /patients` → 201. 400 si el teléfono no es E.164 (`phone` puede ser
+  `null`); 404 si la clínica no existe.
+- `POST /appointments` → 201 con su recordatorio. 400 si los datos son
+  inválidos, `startsAt` no es futura o el paciente no es de esa clínica; 404 si
+  la clínica o el paciente no existen.
+- `GET /appointments/{id}` → 200 con **todos** sus recordatorios, del más
+  antiguo al más nuevo; 404 si no existe.
+- `PATCH /appointments/{id} { startsAt }` → 200. 400 si los datos son inválidos o
+  `startsAt` no es futura; 404 si no existe; 409 si la cita está cancelada o ya
+  empezó.
+- `POST /appointments/{id}/cancel` → 200; si ya estaba cancelada no hace nada y
+  responde 200. 404 si no existe.
+- `POST /jobs/reminders/run` → 200 `{ processed }`: recordatorios que **esta**
+  pasada trató (enviados, reintentados o descartados).
+- `POST /webhooks/inbound-messages { messageId, from, text, receivedAt }` → 200
+  aunque se ignore el mensaje; 400 solo si el cuerpo no cumple el esquema.
+- Recordatorio: `id`, `scheduledFor` (hora de envío tras aplicar las reglas),
+  `status`, `attempts` (llamadas hechas al proveedor), `sentAt` (hora del
+  servicio cuando el proveedor lo aceptó, o `null`), `skipReason` (o `null`).
+
+### Reglas del recordatorio
+
+1. Cada cita tiene un recordatorio para su hora actual.
+2. **Hora de envío:** la misma hora local del día anterior, en la zona IANA de la
+   clínica. Respeta los cambios de horario (último domingo de marzo y de
+   octubre) y que Canarias va una hora por detrás. Ejemplo del enunciado: cita el
+   28/03/2027 a las 10:00 de Madrid → recordatorio el 27/03/2027 a las 10:00 de
+   Madrid (09:00 UTC), aunque entre ambos haya 23 horas.
+3. **Horas de silencio:** entre las 21:00 y las 09:00 hora de la clínica no se
+   envía nada; si la hora de envío cae ahí, pasa a las 09:00 siguientes.
+4. **Ya pasó:** si al crear o reprogramar la hora de envío ya pasó, se usa la
+   hora actual del servicio y se aplica igual la regla 3.
+5. **too_late:** si con todo eso la hora de envío no queda antes del inicio de
+   la cita, el recordatorio se **crea** ya como `skipped` con `too_late`. También
+   queda `skipped`/`too_late` si al ir a enviarlo (primer intento o reintento) la
+   cita ya empezó.
+6. **Sin teléfono / dado de baja:** se evalúa **cuando le toca enviarse** (en el
+   job, no al crear): queda `skipped` con `no_phone` u `opted_out` y no se llama
+   al proveedor.
+7. **Texto exacto**, con fecha y hora locales de la clínica:
+   `Hola {nombre del paciente}, te recordamos tu cita en {nombre de la clínica} el {dd/MM/yyyy} a las {HH:mm}. Responde SI para confirmar o NO para cancelar.`
+8. **Reprogramar:** el recordatorio pendiente pasa a `cancelled` y se crea otro
+   para la nueva hora, **aunque el anterior ya se hubiera enviado** (el enviado se
+   queda `sent`). Si la cita estaba `confirmed`, vuelve a `scheduled`.
+9. **Cancelar** la cita cancela su recordatorio pendiente.
+
+### Job de envío
+
+- `POST /jobs/reminders/run` trata todos los recordatorios que tocan según el
+  reloj del servicio, de todas las clínicas, y responde al terminar. En
+  producción lo lanzaría un cron cada minuto.
+- Puede haber varias pasadas a la vez (como varias instancias): cada
+  recordatorio se envía una sola vez y **el proveedor no recibe dos llamadas para
+  el mismo intento**.
+- Respuestas del proveedor:
+  - 202, o 200 (ya lo tenía y no lo reenvía): `sent`.
+  - 503 (no se entregó): reintentar.
+  - 504, error de red o más de 5 s sin respuesta (puede haberse entregado):
+    reintentar sin que el paciente lo reciba dos veces, es decir, con la misma
+    `Idempotency-Key`.
+  - 422 (rechazado): `failed`, sin reintentos.
+  - 400 no aparece en la tabla del enunciado (el proveedor lo da por petición
+    inválida); ver «Ambigüedades».
+- Reintentos: el 2.º intento va 1 minuto después del primer fallo y el 3.º,
+  5 minutos después del 2.º. Si el 3.º también falla, `failed`. Los reintentos no
+  esperan a que termine la franja de 21:00 a 09:00.
+
+### Webhook `POST /webhooks/inbound-messages`
+
+- SI confirma la cita; NO la cancela **junto con su recordatorio pendiente**.
+  Tolera mayúsculas, tildes, espacios y signos alrededor (`Sí`, `si.`, `NO!`);
+  cualquier otro texto se ignora.
+- Se aplica a la cita que recibió el último recordatorio enviado a ese teléfono,
+  entre las que no han empezado ni están canceladas (puede haber varios
+  pacientes con el mismo número). Si no hay ninguna, se ignora.
+- El mismo `messageId` puede llegar más de una vez: solo se procesa el primero.
+- Responde 200 aunque ignore el mensaje (si respondiera error, el proveedor lo
+  reenviaría); 400 solo con un cuerpo fuera de esquema.
+
+### Estados
+
+- Cita: `scheduled | confirmed | cancelled`.
+- Recordatorio: `pending | sent | failed | skipped | cancelled`, con
+  `skipReason` `too_late | no_phone | opted_out | null`.
+
+### Entregables
+
+- Repositorio público propio con historia real de commits (se evalúa el último
+  commit subido antes del cierre del formulario).
+- README: cómo levantarlo y pasar los tests; decisiones (arquitectura, cómo se
+  evitan los envíos duplicados, cómo se tratan las zonas horarias y qué se
+  descartó); qué quedó fuera y qué se haría con más tiempo; nota de producción
+  de una página como mucho (500 clínicas, unos 20 000 recordatorios al día,
+  proveedor real de WhatsApp, despliegue y monitorización); para qué se usó la IA
+  y qué se corrigió de lo que propuso.
+- Tests, tipos, lint, CI en GitHub Actions y las instrucciones para agentes
+  (`AGENTS.md`, `CLAUDE.md` o similar).
+- Peso: 30 % funciona (horas, envíos, fallos del proveedor, concurrencia y
+  respuestas), 30 % arquitectura y código (reglas de negocio separadas de la
+  infraestructura, errores bien tratados, código que otra persona entienda y
+  cambie), 20 % entorno, 20 % criterio.
+
+### Reunión informativa (2026-11-23)
+
+Respuestas que no están en el PDF: el job procesa los recordatorios de todas
+las clínicas; RLS por clínica es opcional; no hay datos de ejemplo (los tests
+de evaluación crean los suyos); las citas virtuales usarían la hora de Madrid;
+se recomendó, sin obligar, una arquitectura limpia. Se evalúa el último commit
+subido antes del cierre (miércoles 25-11-2026, 17:30 de Madrid).
+
+### Indicaciones del expositor y cómo se encajan
+
+Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
+
+| Indicación en la reunión | Relación con el enunciado | Cómo se incorpora |
+|---|---|---|
+| Citas virtuales con hora peninsular (Madrid) y la misma franja de silencio | No aparece; no lo contradice | Campo opcional `virtual` (por defecto `false`) en `POST /appointments`. La respuesta solo lo incluye cuando vale `true`, así que una cita creada sin el campo responde exactamente con la forma del contrato. Con `true`, hora de envío, franja y texto usan `Europe/Madrid`. Sin el campo, todo funciona como dice el contrato. |
+| Reintentar cada minuto | Choca (1 min y 5 min, 3 intentos) | Se aplica el enunciado. Los retrasos viven en una sola constante del dominio y se cambian en una línea. Se cuenta en el README. |
+| Si cae en la franja, a las 09:00 del día siguiente | Coincide entre 21:00 y 24:00; entre 00:00 y 09:00 el enunciado dice «las 09:00 siguientes» | Siempre la siguiente 09:00 local. |
+| La clínica tiene su configuración (zona, horario de atención) | El contrato solo tiene `timezone` | Franja como constante del dominio; configuración por clínica en «qué haría con más tiempo». |
+| Clave única para no duplicar; comprobar si un 504 se entregó antes de reintentar | Compatible | `Idempotency-Key` = id del recordatorio en todos sus intentos. El reintento con la misma clave es la comprobación: si ya se entregó, el proveedor responde 200 `duplicate`. |
+| Rechazo del proveedor (lo nombró como 400) | El enunciado habla de 422 | 422 y cualquier otro 4xx dejan `failed` sin reintento. |
+| Solo SI o NO; «sí, gracias» no cuenta | Compatible | Solo se quitan espacios y signos alrededor; test con «Sí, gracias». |
+| Con teléfono compartido responde quien recibió el recordatorio | Compatible | Regla del último recordatorio enviado a ese teléfono. |
+| El job es para todas las clínicas | Compatible | Sin filtro por clínica. |
+| Arquitectura limpia, carpetas ordenadas, cuidar validaciones, respuestas y estados | Compatible | Capas `domain`, `application`, `infrastructure` y `http` (ver Decisiones). |
+| Usar todos los tests posibles | Compatible | Unitarios del dominio, e2e con Postgres y proveedor reales, concurrencia y humo con `docker compose`. |
+| CI en GitHub que valide cada cambio antes de aceptarlo | Compatible | Rama por tarea, PR a `main` y CI como check obligatorio. |
+| Instrucciones para IA: `CLAUDE.md`, `AGENTS.md` y skills | Compatible | `AGENTS.md`, `CLAUDE.md` y una skill del proyecto. |
+| Desplegar sin cortar a las clínicas y respetando las ejecuciones en curso | Compatible | Cierre ordenado: al recibir SIGTERM no se toman más recordatorios y se espera a la pasada en curso. Despliegue gradual y migraciones compatibles en la nota de producción. |
+| Redis u otras herramientas para colas | Permitido | No hace falta: Postgres con `SKIP LOCKED` hace de cola. Redis o SQS en la nota de producción. |
+| 3-4 horas como meta | Compatible | Primero el flujo principal; lo que falte se cuenta en el README. |
+| 2 000 recordatorios al día | Choca (20 000) | La nota de producción usa 20 000. |
+
+### Ambigüedades y cómo se resuelven (se cuentan en el README)
+
+- **Citas virtuales:** campo opcional `virtual` (tabla anterior).
+- **Reintentos:** 1 min y 5 min, 3 intentos en total. En el turno de preguntas se
+  habló de cada minuto, pero en pantalla se resaltó la frase del enunciado.
+- **Reloj de pruebas:** congelado hasta el siguiente `PUT`. Antes del primer
+  `PUT` usa la hora del sistema.
+- **Bordes de la franja:** `[21:00, 09:00)`; 21:00 en punto se mueve y 09:00 en
+  punto se envía.
+- **Horas que no existen o se repiten por el cambio de horario:** caen entre las
+  02:00 y las 03:00, dentro de la franja, así que acaban en las 09:00.
+- **Orden de los recordatorios con el reloj congelado:** ids UUIDv7 generados por
+  la aplicación (llevan la hora de creación), y la lista se ordena por id.
+- **«Último recordatorio enviado»:** número de envío de la secuencia de Postgres
+  `reminder_send_seq`, asignado al marcar `sent`. No depende de `sentAt`, que
+  empata con el reloj congelado.
+- **Orden de los descartes en el job:** `too_late`, luego `no_phone`, luego
+  `opted_out`.
+- **Cancelar o reprogramar durante un envío:** esperan al bloqueo de la fila del
+  recordatorio (5 s como mucho) y luego ven el estado final.
+- **SI después de reprogramar:** confirma la cita con su hora nueva.
+- **SI sobre una cita ya confirmada:** no cambia nada.
+- **Ids que no son UUID** (en la ruta o en el cuerpo): 404, como un id que no
+  existe.
+- **Fechas en las respuestas:** UTC con `Z` y sin milisegundos cuando son cero
+  (`2027-03-27T09:00:00Z`, como en el contrato).
+- **Fechas de entrada sin zona** (`2027-03-28T10:00:00`): 400.
+- **Orden de las comprobaciones:** 400 de esquema, luego 404, luego 409 y al
+  final 400 de negocio (paciente de otra clínica, `startsAt` no futura).
+
+## 2. Decisiones
+
+- **El enunciado y el contrato mandan.** Lo que dijo el expositor se incorpora
+  donde no los contradice (tabla «Indicaciones del expositor»).
+- **Stack:**
+
+  | Tema | Elección |
+  |---|---|
+  | Runtime | Node 24 (imagen `node:24-alpine`) y TypeScript `~6.0.3` (la plantilla trae `^6.0.2`; se fija la menor) |
+  | Framework | Nest 12 en ESM con Express (plantilla por defecto de `nest new`) |
+  | Validación | class-validator con un `ValidationPipe` global; un exception filter devuelve `{ "error": "..." }` |
+  | Base de datos | Postgres 17 (`postgres:17-alpine`) con MikroORM 7 (`@mikro-orm/postgresql`, `@mikro-orm/nestjs`, `@mikro-orm/migrations`) |
+  | Ids | UUIDv7 con el paquete `uuid` |
+  | Fechas | Luxon, con todas las horas en `timestamptz` |
+  | Proveedor | `fetch` nativo con `AbortSignal.timeout(5000)` |
+  | Tests | Vitest (plantilla de Nest) y supertest; e2e contra Postgres real y `provider/server.mjs` real |
+  | Lint | oxlint `--type-aware` de la plantilla (`.oxlintrc.json`) con `typescript/no-floating-promises` como error y `typescript/no-explicit-any` activado; Prettier comprobado con `prettier --check` |
+  | CI | GitHub Actions: lint, tipos, unitarios, e2e y humo con `docker compose` |
+
+- **Arquitectura por capas con dependencias hacia dentro:**
+  - `src/domain`: tipos y funciones puras. No importa Nest, MikroORM ni nada de
+    E/S.
+  - `src/application`: casos de uso (clases sin decoradores) y puertos (clases
+    abstractas que Nest usa como token).
+  - `src/infrastructure`: MikroORM, cliente HTTP del proveedor y relojes.
+  - `src/http`: controladores finos, DTOs, presentadores y el filtro de errores.
+  - Los casos de uso se registran en Nest con `useFactory`.
+- **Persistencia:** las entidades de MikroORM se declaran con `defineEntity` sin
+  clase y viven solo en `infrastructure`. Los repositorios traducen entre filas
+  y tipos del dominio. Cada caso de uso abre una transacción explícita con el
+  puerto `Transactions`, que ejecuta `em.fork().transactional(...)`. Las
+  migraciones son SQL escrito a mano en clases `Migration` registradas en
+  `migrationsList`, y corren antes de abrir el puerto.
+- **Doble envío:** una transacción por recordatorio. Se toma con
+  `LockMode.PESSIMISTIC_PARTIAL_WRITE` (`FOR UPDATE SKIP LOCKED`), se vuelven a
+  comprobar las reglas, se llama al proveedor con `Idempotency-Key` = id del
+  recordatorio y se guarda el resultado antes del `COMMIT`. Un índice único
+  parcial garantiza un solo recordatorio `pending` por cita.
+- **Reloj:** puerto `Clock`. Ninguna regla usa `new Date()`, `Date.now()` ni
+  `now()` de Postgres para la hora de negocio.
+- **Flujo de trabajo:**
+  - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
+    merge commit (sin squash) para conservar la historia real.
+  - El repositorio público se crea cuando se autorice expresamente.
+  - Commits en español con Conventional Commits, sin citas textuales. Los
+    identificadores del código van en inglés; README, `AGENTS.md` y documentos
+    en español.
+- **Arquitectura de eventos (EventBridge, colas):** solo como propuesta en la
+  nota de producción; el servicio entregado es una API REST con Postgres. Un
+  `infra/` con Pulumi en TypeScript es opcional y solo al final.
+
+## 3. Plan
+
+# Recordatorios de citas · Plan de implementación
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** API de clínicas, pacientes y citas que programa, envía (con reintentos
+y sin duplicados) y procesa las respuestas de los recordatorios, según
+`openapi.yaml`.
+
+**Architecture:** Nest 12 como capa HTTP sobre casos de uso sin framework, que
+usan funciones puras del dominio y puertos implementados con MikroORM y `fetch`.
+El job es una transacción por recordatorio con `FOR UPDATE SKIP LOCKED`.
+
+**Tech Stack:** Node 24, TypeScript 6.0, Nest 12 (ESM), MikroORM 7, Postgres 17,
+Luxon, uuid (v7), class-validator, Vitest y supertest, GitHub Actions.
+
+**Spec:** este mismo documento (secciones 1 y 2), `enunciado.pdf` y
+`openapi.yaml`.
+
+### Global Constraints
+
+- Node ≥ 22 (se usa 24) y TypeScript `~6.0.3`.
+- `docker compose up --build` levanta `api` en el puerto 3000 con
+  `CLOCK_MODE=test` y `PROVIDER_URL=http://provider:4010`, más `db`. El bloque
+  `provider` de `docker-compose.yml` no se toca.
+- Errores: `{ "error": "<mensaje>" }`. Fechas de salida en UTC con `Z` (ver
+  `toApiDate`).
+- Texto exacto: `Hola {nombre del paciente}, te recordamos tu cita en {nombre de la clínica} el {dd/MM/yyyy} a las {HH:mm}. Responde SI para confirmar o NO para cancelar.`
+- Franja de silencio `[21:00, 09:00)` local; reintentos a `[1, 5]` minutos, 3
+  intentos como mucho; timeout del proveedor 5000 ms.
+- E.164: `/^\+[1-9]\d{7,14}$/` (la misma regex que el proveedor).
+- `src/domain` no importa `@nestjs/*`, `@mikro-orm/*` ni hace E/S; la hora
+  siempre llega de `Clock`.
+- Códigos: `POST /clinics`, `/patients` y `/appointments` → 201;
+  `POST /appointments/{id}/cancel`, `/jobs/reminders/run` y
+  `/webhooks/inbound-messages` → 200 (`@HttpCode(200)`); `PUT /test/clock` → 204.
+- Cada tarea se hace en su rama y entra por PR con el CI en verde. Commits en
+  español, sin citas textuales.
+
+### Review Focus
+
+1. **Formato de fechas:** el contrato muestra `2027-03-27T09:00:00Z`; si se
+   devuelve `toISOString()` (`.000Z`), una comparación de texto falla. Test en la
+   tarea 1 (`toApiDate`) y en la tarea 5 (respuesta de `POST /appointments`).
+2. **Ids que no son UUID:** `GET /appointments/abc` o `clinicId: "x"` no pueden
+   dar 500 por el cast de Postgres; deben dar 404. Tests en las tareas 3 y 5.
+3. **Varios recordatorios creados en el mismo instante congelado:** reprogramar
+   dos veces sin mover el reloj debe listar los recordatorios en orden de
+   creación. Test en la tarea 6.
+4. **Teléfono compartido con envíos en la misma pasada (mismo `sentAt`):** la
+   respuesta debe ir a la cita enviada en último lugar. Test en la tarea 8.
+5. **La cita empieza entre dos intentos:** el reintento queda `skipped`
+   `too_late` sin llamar al proveedor y conserva `attempts`. Test en la tarea 7.
+
+### Estructura de archivos
+
+```
+src/
+  main.ts                         arranque: loadConfig + createApp + listen
+  app.factory.ts                  createApp(config): pipes, filtro, migraciones, shutdown hooks
+  app.module.ts                   AppModule.forRoot(config)
+  config/app-config.ts            AppConfig y loadConfig(env)
+  domain/                         tipos y funciones puras (una responsabilidad por archivo)
+    ids.ts clinic.ts patient.ts appointment.ts reminder.ts time-zones.ts
+    reminder-schedule.ts reminder-message.ts retry-policy.ts provider-outcome.ts patient-reply.ts
+  application/
+    errors.ts                     NotFoundError, ValidationError, ConflictError
+    ports/                        clock.ts transactions.ts repositories.ts message-provider.ts
+    clinics/ patients/ appointments/ reminders/ inbound/   un caso de uso por archivo
+  infrastructure/
+    clock/                        system-clock.ts test-clock.ts
+    persistence/                  mikro-orm.config.ts entities.ts mikro-orm-transactions.ts
+                                  repositories/*.ts migrations/*.ts persistence.module.ts
+    provider/http-message-provider.ts
+  http/
+    error.filter.ts validation.ts api-date.ts presenters.ts shutdown-coordinator.ts
+    *.controller.ts dto/*.ts
+test/
+  support/                        global-setup.ts app.ts provider-admin.ts fixtures.ts
+  *.e2e-spec.ts
+```
+
+Los tests unitarios van junto al archivo (`*.spec.ts`).
+
+### Task 0: Repositorio público (requiere autorización expresa)
+
+- [x] **Step 1:** Pedir autorización para crear el repositorio público y subir
+  `main`. No se hace nada en GitHub hasta tenerla.
+- [x] **Step 2:** el clon apunta `origin` al repositorio de la prueba, así que
+  primero `git remote rename origin upstream`. Después
+  `gh repo create <usuario>/clinicsay-backend-challenge --public --source . --remote origin --push`
+  y comprobar con `git ls-remote origin main` que coincide con `c5a8515`.
+
+### Task 1: Andamiaje de Nest, reloj, errores y CI
+
+Rama `feat/andamiaje`.
+
+**Files:**
+- Create: `package.json`, `tsconfig.json`, `tsconfig.build.json`,
+  `nest-cli.json`, `.oxlintrc.json`, `.prettierrc`, `vitest.config.ts`,
+  `vitest.config.e2e.ts`, `.nvmrc` (`24`), `.gitignore`
+- Create: `src/main.ts`, `src/app.factory.ts`, `src/app.module.ts`,
+  `src/config/app-config.ts`, `src/application/ports/clock.ts`,
+  `src/infrastructure/clock/system-clock.ts`,
+  `src/infrastructure/clock/test-clock.ts`, `src/http/error.filter.ts`,
+  `src/http/validation.ts`, `src/http/api-date.ts`,
+  `src/infrastructure/clock/test-clock.controller.ts` (adaptador de
+  `TestClock`, por eso vive en `infrastructure`), `test/architecture.spec.ts`
+- Create: `test/support/app.ts`, `test/test-clock.e2e-spec.ts`,
+  `src/http/api-date.spec.ts`, `src/http/validation.spec.ts`
+- Create: `.github/workflows/ci.yml`, `AGENTS.md`, `CLAUDE.md` (primera versión)
+
+**Interfaces:**
+- Produces:
+  - `type ClockMode = 'test' | 'system'`;
+    `interface AppConfig { port: number; databaseUrl: string; providerUrl: string; clockMode: ClockMode; providerTimeoutMs: number }`;
+    `loadConfig(env: NodeJS.ProcessEnv): AppConfig` (por defecto `port` 3000 y
+    `providerTimeoutMs` 5000; `clockMode` es `'test'` solo si
+    `CLOCK_MODE === 'test'`).
+  - `abstract class Clock { abstract now(): Date }`;
+    `class SystemClock extends Clock`;
+    `class TestClock extends Clock { set(now: Date): void }` (empieza en la hora
+    del sistema).
+  - `createApp(config: AppConfig): Promise<INestApplication>`.
+  - `toApiDate(date: Date): string`.
+  - `isIsoDateTimeWithZone(value: unknown): boolean` y el decorador
+    `IsIsoDateTimeWithZone()`.
+  - `startTestApp(overrides?: Partial<AppConfig>): Promise<TestApp>` con
+    `TestApp = { http: ReturnType<typeof request>; app: INestApplication; setClock(iso: string): Promise<void>; close(): Promise<void> }`.
+
+- [ ] **Step 1: Generar el proyecto.** `npx @nestjs/cli@12 new api --type esm --package-manager npm --skip-git`
+  en un directorio temporal del scratchpad. Mover su contenido a la raíz sin
+  pisar `provider/`, `openapi.yaml`, `docker-compose.yml`, `docs/`,
+  `README.md`, `AGENTS.md` ni `CLAUDE.md`. Los `AGENTS.md` y `CLAUDE.md` de la
+  plantilla (que remiten a `@nestjs/idempotency`, `@nestjs/resilience` y Nest
+  Observe) se descartan; los del repo ya explican por qué no se usan. Borrar
+  `AppController` y `AppService` de ejemplo. Scripts de `package.json`:
+  `lint` (`oxlint --type-aware src/ test/` y `prettier --check`), `typecheck`
+  (`tsc --noEmit`), `test`, `test:e2e`, `db:up`
+  (`docker compose up -d --wait db`) y
+  `verify` (`npm run lint && npm run typecheck && npm test && npm run test:e2e`). Fijar
+  `"typescript": "~6.0.3"` y `"engines": { "node": ">=22" }`.
+- [ ] **Step 2: Escribir los tests que fallan.**
+
+```ts
+// src/http/api-date.spec.ts
+expect(toApiDate(new Date('2027-03-27T09:00:00.000Z'))).toBe('2027-03-27T09:00:00Z');
+expect(toApiDate(new Date('2027-03-27T09:00:00.500Z'))).toBe('2027-03-27T09:00:00.500Z');
+// src/http/validation.spec.ts
+expect(isIsoDateTimeWithZone('2027-03-28T08:00:00Z')).toBe(true);
+expect(isIsoDateTimeWithZone('2027-03-28T10:00:00+02:00')).toBe(true);
+expect(isIsoDateTimeWithZone('2027-03-28T10:00:00')).toBe(false);
+expect(isIsoDateTimeWithZone('2027-02-30T10:00:00Z')).toBe(false);
+expect(isIsoDateTimeWithZone('mañana')).toBe(false);
+expect(isIsoDateTimeWithZone(123)).toBe(false);
+// test/test-clock.e2e-spec.ts
+it('PUT /test/clock responde 204 en modo test')            // body { now: '2027-03-01T00:00:00Z' }
+it('PUT /test/clock con now inválido responde 400 { error }') // expect(typeof res.body.error).toBe('string')
+it('PUT /test/clock no existe sin CLOCK_MODE=test')         // startTestApp({ clockMode: 'system' }) → 404 con { error }
+it('una ruta desconocida responde 404 { error }')
+// test/architecture.spec.ts (lee los .ts de src/ y revisa sus imports)
+it('src/domain no importa @nestjs, @mikro-orm, application, infrastructure ni http')
+it('src/application no importa @mikro-orm, infrastructure ni http')
+```
+
+- [ ] **Step 3: Verlos fallar.** `npx vitest run src/http` y
+  `npm run test:e2e -- test/test-clock.e2e-spec.ts`. Esperado: FAIL porque no
+  existen los módulos.
+- [ ] **Step 4: Implementar.**
+  - `toApiDate` usa Luxon:
+    `DateTime.fromJSDate(d, { zone: 'utc' }).toISO({ suppressMilliseconds: true })`
+    y cambia `+00:00` por `Z`.
+  - `isIsoDateTimeWithZone` exige `Z` u offset `±HH:MM` con la regex
+    `/(Z|[+-]\d{2}:\d{2})$/` y que `DateTime.fromISO(value, { setZone: true }).isValid`.
+  - El `ValidationPipe` global usa `whitelist: true` y `transform: true`, sin
+    conversión implícita. Su `exceptionFactory` une los mensajes en un único
+    `string`.
+  - `ErrorFilter` (`@Catch()`) traduce `ValidationError` → 400,
+    `NotFoundError` → 404, `ConflictError` → 409 y `HttpException` → su
+    status con `{ error: message }`. Cualquier otro error da 500
+    `{ error: 'internal error' }` y se registra en el log.
+  - `TestClockController` solo se incluye en `AppModule` si
+    `config.clockMode === 'test'`. El proveedor `Clock` usa `TestClock` en modo
+    test y `SystemClock` en el resto.
+  - `createApp` llama a `app.enableShutdownHooks()`.
+- [ ] **Step 5: Verlos pasar** con los mismos comandos. Además `npm run lint` y
+  `npx tsc --noEmit` sin errores.
+- [ ] **Step 6: CI y agentes.**
+  - `ci.yml` se dispara en `push` y en `pull_request` a `main`. Job `checks`
+    sobre `ubuntu-latest` con Node 24: `npm ci`, `npm run lint`,
+    `npx tsc --noEmit`, `npm test` y `npm run test:e2e`.
+  - `AGENTS.md` y `CLAUDE.md` ya están redactados (ver Estado del
+    2026-11-23). En esta tarea solo se ajustan a lo que exista de verdad:
+    comandos, rutas del mapa de reglas y trampas del stack que se hayan
+    confirmado o descartado.
+- [ ] **Step 7: Commit, PR y merge** cuando el CI esté verde. Con el
+  repositorio ya publicado, activar la protección de `main` con el check
+  `checks` como obligatorio: `gh api -X PUT repos/<usuario>/<repo>/branches/main/protection`
+  con `required_status_checks.contexts=["checks"]`.
+
+### Task 2: Postgres, MikroORM, migraciones, health y Docker
+
+Rama `feat/persistencia`.
+
+**Files:**
+- Create: `src/infrastructure/persistence/mikro-orm.config.ts`, `entities.ts`,
+  `migrations/Migration20261123000000_initial.ts`, `persistence.module.ts`,
+  `src/infrastructure/persistence/health.controller.ts` (usa MikroORM, así
+  que no va en `http`)
+- Create: `Dockerfile`, `.dockerignore`, `test/support/global-setup.ts`,
+  `test/support/provider-admin.ts`, `test/health.e2e-spec.ts`
+- Modify: `docker-compose.yml` (añadir `db` y `api`), `src/app.factory.ts`,
+  `test/support/app.ts`, `vitest.config.e2e.ts`, `.github/workflows/ci.yml`
+
+**Interfaces:**
+- Consumes: `AppConfig`, `createApp`, `startTestApp`.
+- Produces:
+  - `createOrmConfig(config: AppConfig)`.
+  - Las entidades `ClinicEntity`, `PatientEntity`, `AppointmentEntity`,
+    `ReminderEntity` e `InboundMessageEntity`, declaradas con `defineEntity`
+    sin clase.
+  - `TestApp` añade `orm: MikroORM`, `reset(): Promise<void>` (hace TRUNCATE de
+    todas las tablas y `/admin/reset` en el proveedor) y
+    `provider: ProviderAdmin`.
+  - `ProviderAdmin = { rule(to: string, mode: 'unavailable' | 'lost-response' | 'reject', count: number): Promise<void>; messages(to: string): Promise<{ text: string; idempotencyKey: string }[]>; requests(to: string): Promise<{ idempotencyKey: string; status: number }[]> }`.
+
+- [ ] **Step 1: Escribir el test que falla.**
+
+```ts
+// test/health.e2e-spec.ts
+it('GET /health responde 200 con la base migrada', async () => {
+  const res = await t.http.get('/health');
+  expect(res.status).toBe(200);
+  const tables = await t.orm.em.getConnection().execute(
+    "select table_name from information_schema.tables where table_schema = 'public'");
+  expect(tables.map((r) => r.table_name)).toEqual(
+    expect.arrayContaining(['clinic', 'patient', 'appointment', 'reminder', 'inbound_message']));
+});
+```
+
+- [ ] **Step 2: Verlo fallar** con `npm run test:e2e -- test/health.e2e-spec.ts`.
+  Esperado: FAIL.
+- [ ] **Step 3: Escribir la migración inicial con este SQL exacto.**
+
+```sql
+create table clinic (id uuid primary key, name text not null, timezone text not null);
+create table patient (id uuid primary key, clinic_id uuid not null references clinic(id),
+  name text not null, phone text null, accepts_reminders boolean not null);
+create table appointment (id uuid primary key, clinic_id uuid not null references clinic(id),
+  patient_id uuid not null references patient(id), starts_at timestamptz not null,
+  status text not null check (status in ('scheduled','confirmed','cancelled')),
+  virtual boolean not null default false);
+create table reminder (id uuid primary key, appointment_id uuid not null references appointment(id),
+  scheduled_for timestamptz not null,
+  status text not null check (status in ('pending','sent','failed','skipped','cancelled')),
+  skip_reason text null check (skip_reason in ('too_late','no_phone','opted_out')),
+  attempts int not null default 0, next_attempt_at timestamptz null,
+  sent_at timestamptz null, sent_to text null, send_seq bigint null);
+create unique index reminder_one_pending on reminder (appointment_id) where status = 'pending';
+create index reminder_due on reminder (next_attempt_at, id) where status = 'pending';
+create index reminder_by_appointment on reminder (appointment_id, id);
+create index reminder_last_sent on reminder (sent_to, send_seq desc) where status = 'sent';
+create sequence reminder_send_seq;
+create table inbound_message (message_id text primary key, received_at timestamptz not null);
+```
+
+- [ ] **Step 4: Implementar la persistencia y el arranque.**
+  - Las entidades replican esas columnas con `p.uuid()`, `p.datetime()`,
+    etc., y guardan los ids de las relaciones como propiedades escalares
+    (`clinicId`, `appointmentId`...).
+  - La configuración usa `extensions: [Migrator]`,
+    `migrations: { migrationsList: [Migration20261123000000_initial] }` y
+    `entities` explícitas.
+  - `createApp` ejecuta `orm.migrator.up()` antes de devolver la app.
+  - `HealthController` hace `select 1` y responde 200 `{ status: 'ok' }`, o 503
+    si falla.
+  - `global-setup.ts`:
+    - crea la base `clinicsay_test` si no existe, conectando a `postgres` con
+      `TEST_DATABASE_URL`, que por defecto es
+      `postgres://clinicsay:clinicsay@localhost:5432/clinicsay_test`;
+    - lanza `node provider/server.mjs` con `PORT=4011`, espera a su `/health` y
+      lo detiene al terminar.
+  - `vitest.config.e2e.ts` usa `fileParallelism: false`.
+- [ ] **Step 5: Docker.**
+  - `Dockerfile` en dos etapas sobre `node:24-alpine`: `npm ci`, `npm run build`
+    y `npm prune --omit=dev`. Arranca con `CMD ["node", "dist/main.js"]` y tiene
+    un `HEALTHCHECK` que hace `fetch('http://localhost:3000/health')` con `node -e`.
+  - En `docker-compose.yml`:
+    - `db`: `postgres:17-alpine`, con `POSTGRES_USER`, `POSTGRES_PASSWORD` y
+      `POSTGRES_DB` en `clinicsay`, `pg_isready` como healthcheck y el puerto
+      `5432:5432`.
+    - `api`: `build: .`, `3000:3000`, `CLOCK_MODE=test`,
+      `PROVIDER_URL=http://provider:4010` y
+      `DATABASE_URL=postgres://clinicsay:clinicsay@db:5432/clinicsay`, con
+      `depends_on` en `db` (`service_healthy`) y `provider`
+      (`service_started`).
+- [ ] **Step 6: Verificar.** `npm run test:e2e` pasa. Además
+  `docker compose up --build -d --wait` y
+  `curl -s -o /dev/null -w '%{http_code}' localhost:3000/health` devuelve
+  `200`. Al final, `docker compose down -v`.
+- [ ] **Step 7: CI.**
+  - Al job `checks` se le añade el servicio `postgres:17-alpine` con
+    `POSTGRES_DB=clinicsay_test` y la variable `TEST_DATABASE_URL`.
+  - Job nuevo `compose`: `docker compose up --build -d --wait`, `curl` a
+    `/health` y `docker compose down -v`.
+  - El check `compose` pasa a ser obligatorio.
+- [ ] **Step 8: Commit, PR y merge.**
+
+### Task 3: Clínicas y pacientes
+
+Rama `feat/clinicas-pacientes`.
+
+**Files:**
+- Create: `src/domain/ids.ts`, `src/domain/clinic.ts`, `src/domain/patient.ts`
+  (con sus `*.spec.ts`)
+- Create: `src/application/errors.ts`, `src/application/ports/transactions.ts`,
+  `src/application/ports/repositories.ts`,
+  `src/application/clinics/create-clinic.ts`,
+  `src/application/patients/create-patient.ts`
+- Create: `src/infrastructure/persistence/mikro-orm-transactions.ts`,
+  `repositories/clinic.repository.ts`, `repositories/patient.repository.ts`
+- Create: `src/http/clinics.controller.ts`, `src/http/patients.controller.ts`,
+  `src/http/dto/create-clinic.dto.ts`, `src/http/dto/create-patient.dto.ts`,
+  `src/http/presenters.ts`
+- Create: `test/support/fixtures.ts`, `test/clinics-patients.e2e-spec.ts`
+
+**Interfaces:**
+- Produces:
+  - `newId(): string` (uuid v7); `isId(value: string): boolean` (valida un UUID).
+  - `type Clinic = { id: string; name: string; timezone: string }`;
+    `isValidTimeZone(tz: string): boolean`.
+  - `type Patient = { id: string; clinicId: string; name: string; phone: string | null; acceptsReminders: boolean }`;
+    `E164: RegExp`.
+  - `abstract class Transactions { abstract run<T>(work: (repos: Repositories) => Promise<T>): Promise<T> }`.
+  - `interface Repositories { clinics: ClinicRepository; patients: PatientRepository }`.
+    Las tareas siguientes añaden `appointments`, `reminders` e
+    `inboundMessages`.
+  - `ClinicRepository { findById(id: string): Promise<Clinic | null>; insert(c: Clinic): Promise<void> }`
+    y lo mismo para `PatientRepository`.
+  - `CreateClinic.execute(input: { name: string; timezone: string }): Promise<Clinic>`.
+  - `CreatePatient.execute(input: { clinicId: string; name: string; phone: string | null; acceptsReminders: boolean }): Promise<Patient>`.
+  - `fixtures.ts`: `createClinic(t, over?)` (por defecto
+    `{ name: 'Clínica Dental Sonrisa', timezone: 'Europe/Madrid' }`) y
+    `createPatient(t, clinicId, over?)` (por defecto
+    `{ name: 'Ana', phone: '+34600111222', acceptsReminders: true }`).
+    Ambas devuelven el body de la respuesta.
+
+- [ ] **Step 1: Escribir los tests que fallan.**
+
+```ts
+// src/domain/clinic.spec.ts
+expect(isValidTimeZone('Europe/Madrid')).toBe(true);
+expect(isValidTimeZone('Atlantic/Canary')).toBe(true);
+expect(isValidTimeZone('Europe/Narnia')).toBe(false);
+// test/clinics-patients.e2e-spec.ts
+it('POST /clinics → 201 { id, name, timezone }')
+it('POST /clinics con zona inexistente → 400 { error }')      // timezone: 'Europe/Narnia'
+it('POST /clinics sin name o con name "" → 400')
+it('POST /clinics con JSON mal formado → 400 { error }')
+it('POST /patients → 201 con phone null si no se envía')      // body sin phone → phone: null
+it('POST /patients con phone "600111222" → 400')
+it('POST /patients con acceptsReminders "true" (string) → 400')
+it('POST /patients con clínica inexistente → 404')            // clinicId: newId()
+it('POST /patients con clinicId que no es UUID → 404')        // clinicId: 'abc'
+```
+
+- [ ] **Step 2: Verlos fallar.**
+- [ ] **Step 3: Implementar.**
+  - Los DTOs usan `@IsString() @MinLength(1)` para `name`, `@IsString()` para
+    `timezone` y `clinicId`, `@IsOptional() @Matches(E164)` para `phone` y
+    `@IsBoolean()` para `acceptsReminders`.
+  - `CreatePatient` lanza `NotFoundError` si `!isId(clinicId)` o si la clínica
+    no existe.
+  - `MikroOrmTransactions.run` hace `this.orm.em.fork().transactional((tx) => work(buildRepositories(tx)))`.
+  - Los repositorios hacen `tx.insert(Entity, row)` y `tx.findOne(...)` y
+    traducen la fila a un tipo del dominio.
+- [ ] **Step 4: Verlos pasar** (`npx vitest run src/domain` y
+  `npm run test:e2e`).
+- [ ] **Step 5: Commit, PR y merge.**
+
+### Task 4: Hora de envío y texto (dominio puro)
+
+Rama `feat/horario-recordatorio`.
+
+**Files:**
+- Create: `src/domain/time-zones.ts`, `src/domain/reminder-schedule.ts`,
+  `src/domain/reminder-message.ts` y sus `*.spec.ts`
+
+**Interfaces:**
+- Produces:
+  - `VIRTUAL_TIME_ZONE = 'Europe/Madrid'`;
+    `effectiveTimeZone(clinicTimeZone: string, virtual: boolean): string`.
+  - `QUIET_HOURS = { start: 21, end: 9 } as const`.
+  - `type ReminderPlan = { scheduledFor: Date; skipReason: 'too_late' | null }`.
+  - `planReminder(input: { startsAt: Date; timeZone: string; now: Date }): ReminderPlan`.
+  - `buildReminderText(input: { patientName: string; clinicName: string; startsAt: Date; timeZone: string }): string`.
+
+- [ ] **Step 1: Escribir los tests que fallan** (tabla en
+  `reminder-schedule.spec.ts`, con `now` por defecto `2027-03-01T00:00:00Z` y
+  `timeZone` por defecto `Europe/Madrid`).
+
+| Caso | startsAt | timeZone | now | scheduledFor | skipReason |
+|---|---|---|---|---|---|
+| Enunciado (23 h por el cambio de marzo) | `2027-03-28T08:00:00Z` | Madrid | — | `2027-03-27T09:00:00Z` | null |
+| Canarias en el cambio de marzo | `2027-03-28T09:00:00Z` | `Atlantic/Canary` | — | `2027-03-27T10:00:00Z` | null |
+| Cambio de octubre (25 h) | `2027-10-31T09:00:00Z` | Madrid | — | `2027-10-30T08:00:00Z` | null |
+| Franja por la noche (22:30) | `2027-03-10T21:30:00Z` | Madrid | — | `2027-03-10T08:00:00Z` | null |
+| Franja de madrugada (08:00) | `2027-03-10T07:00:00Z` | Madrid | — | `2027-03-09T08:00:00Z` | null |
+| 21:00 en punto se mueve | `2027-03-10T20:00:00Z` | Madrid | — | `2027-03-10T08:00:00Z` | null |
+| 09:00 en punto se envía | `2027-03-10T08:00:00Z` | Madrid | — | `2027-03-09T08:00:00Z` | null |
+| Ya pasó → ahora | `2027-03-10T17:00:00Z` | Madrid | `2027-03-10T12:00:00Z` | `2027-03-10T12:00:00Z` | null |
+| Ya pasó y ahora cae en la franja | `2027-03-11T09:00:00Z` | Madrid | `2027-03-10T21:30:00Z` | `2027-03-11T08:00:00Z` | null |
+| too_late (09:00 no queda antes de las 08:30) | `2027-03-11T07:30:00Z` | Madrid | `2027-03-10T21:30:00Z` | `2027-03-11T08:00:00Z` | `too_late` |
+| too_late por igualdad | `2027-03-11T08:00:00Z` | Madrid | `2027-03-10T21:30:00Z` | `2027-03-11T08:00:00Z` | `too_late` |
+
+```ts
+expect(effectiveTimeZone('Atlantic/Canary', true)).toBe('Europe/Madrid');
+expect(effectiveTimeZone('Atlantic/Canary', false)).toBe('Atlantic/Canary');
+expect(buildReminderText({ patientName: 'Ana', clinicName: 'Clínica Dental Sonrisa',
+  startsAt: new Date('2027-03-28T08:00:00Z'), timeZone: 'Europe/Madrid' }))
+  .toBe('Hola Ana, te recordamos tu cita en Clínica Dental Sonrisa el 28/03/2027 a las 10:00. Responde SI para confirmar o NO para cancelar.');
+```
+
+- [ ] **Step 2: Verlos fallar** con `npx vitest run src/domain`.
+- [ ] **Step 3: Implementar `planReminder`.**
+
+```
+candidato = startsAt en timeZone, menos 1 día de calendario (Luxon minus({ days: 1 }))
+si candidato < now → candidato = now en timeZone
+si candidato.hour >= 21 → día siguiente a las 09:00:00.000
+si candidato.hour < 9  → ese mismo día a las 09:00:00.000
+skipReason = candidato < startsAt ? null : 'too_late'
+```
+
+  `buildReminderText` usa `toFormat('dd/MM/yyyy')` y `toFormat('HH:mm')` en la
+  zona indicada.
+- [ ] **Step 4: Verlos pasar.**
+- [ ] **Step 5: Commit, PR y merge.**
+
+### Task 5: Crear y ver citas (con `virtual`)
+
+Rama `feat/citas`.
+
+**Files:**
+- Create: `src/domain/appointment.ts`, `src/domain/reminder.ts` (con sus
+  `*.spec.ts`), `src/application/appointments/create-appointment.ts`,
+  `src/application/appointments/get-appointment.ts`,
+  `src/infrastructure/persistence/repositories/appointment.repository.ts`,
+  `src/infrastructure/persistence/repositories/reminder.repository.ts`,
+  `src/http/appointments.controller.ts`,
+  `src/http/dto/create-appointment.dto.ts`, `test/appointments.e2e-spec.ts`
+- Modify: `src/application/ports/repositories.ts`, `src/http/presenters.ts`,
+  `test/support/fixtures.ts`
+
+**Interfaces:**
+- Consumes: `planReminder`, `effectiveTimeZone`, `Transactions`, `Clock`,
+  `newId` e `isId`.
+- Produces:
+  - `type AppointmentStatus = 'scheduled' | 'confirmed' | 'cancelled'`.
+  - `type Appointment = { id: string; clinicId: string; patientId: string; startsAt: Date; status: AppointmentStatus; virtual: boolean }`.
+  - `type ReminderStatus = 'pending' | 'sent' | 'failed' | 'skipped' | 'cancelled'`;
+    `type SkipReason = 'too_late' | 'no_phone' | 'opted_out'`.
+  - `type Reminder = { id: string; appointmentId: string; scheduledFor: Date; status: ReminderStatus; skipReason: SkipReason | null; attempts: number; nextAttemptAt: Date | null; sentAt: Date | null; sentTo: string | null; sendSeq: number | null }`.
+  - `newReminder(id: string, appointmentId: string, plan: ReminderPlan): Reminder`
+    devuelve `pending` con `nextAttemptAt = scheduledFor`, o `skipped`
+    `too_late` con `nextAttemptAt = null`.
+  - `AppointmentRepository { findById(id): Promise<Appointment | null>; lockById(id): Promise<Appointment | null>; insert(a): Promise<void>; update(a): Promise<void> }`.
+  - `ReminderRepository { listByAppointment(appointmentId): Promise<Reminder[]> /* orden por id asc */; insert(r): Promise<void>; update(r): Promise<void> }`.
+  - `type AppointmentView = { appointment: Appointment; reminders: Reminder[] }`.
+  - `CreateAppointment.execute(input: { clinicId: string; patientId: string; startsAt: Date; virtual: boolean }): Promise<AppointmentView>`.
+  - `GetAppointment.execute(id: string): Promise<AppointmentView>`.
+  - `fixtures.createAppointment(t, clinicId, patientId, startsAt, over?)`.
+
+- [ ] **Step 1: Escribir los tests que fallan.**
+
+```ts
+// test/appointments.e2e-spec.ts (reloj en 2027-03-01T00:00:00Z salvo que se diga otra cosa)
+it('POST /appointments → 201 con su recordatorio pendiente', async () => {
+  // startsAt: '2027-03-28T10:00:00+02:00'
+  expect(res.status).toBe(201);
+  expect(res.body).toEqual({ id: expect.any(String), clinicId, patientId,
+    startsAt: '2027-03-28T08:00:00Z', status: 'scheduled',   // sin `virtual`
+    reminders: [{ id: expect.any(String), scheduledFor: '2027-03-27T09:00:00Z',
+      status: 'pending', attempts: 0, sentAt: null, skipReason: null }] });
+});
+it('GET /appointments/{id} devuelve lo mismo que el POST')
+it('startsAt sin zona → 400')                         // '2027-03-28T10:00:00'
+it('startsAt no futura → 400')                        // '2027-02-28T10:00:00Z'
+it('paciente de otra clínica → 400')
+it('clínica o paciente inexistentes → 404')
+it('GET con id inexistente o que no es UUID → 404')   // newId() y 'abc'
+it('se crea skipped too_late si no da tiempo')        // reloj 2027-03-10T21:30:00Z, startsAt 2027-03-11T07:30:00Z
+it('virtual usa la hora de Madrid en una clínica de Canarias', async () => {
+  // startsAt 2027-03-10T08:30:00Z: sin virtual → scheduledFor 2027-03-09T09:00:00Z; con virtual → 2027-03-09T08:30:00Z
+  // con virtual: true, POST y GET devuelven `virtual: true`; sin él, la clave no aparece
+});
+```
+
+- [ ] **Step 2: Verlos fallar.**
+- [ ] **Step 3: Implementar.**
+  - El DTO usa `@IsIsoDateTimeWithZone()` para `startsAt` y
+    `@IsOptional() @IsBoolean()` para `virtual` (por defecto `false`).
+  - Orden en `CreateAppointment`, dentro de una transacción:
+    1. `isId` y existencia de la clínica y del paciente → 404;
+    2. `patient.clinicId !== clinicId` → 400;
+    3. `startsAt <= clock.now()` → 400;
+    4. `planReminder` con `effectiveTimeZone`, y se insertan la cita y el
+       recordatorio.
+  - El presentador convierte cada fecha con `toApiDate` y no expone
+    `nextAttemptAt`, `sentTo` ni `sendSeq`. Añade `virtual: true` solo si la
+    cita es virtual; si no, la clave no aparece.
+- [ ] **Step 4: Verlos pasar.**
+- [ ] **Step 5: Commit, PR y merge.**
+
+### Task 6: Reprogramar y cancelar
+
+Rama `feat/reprogramar-cancelar`.
+
+**Files:**
+- Modify: `src/domain/appointment.ts`, `src/domain/reminder.ts` (y sus specs),
+  `src/application/ports/repositories.ts`,
+  `src/infrastructure/persistence/repositories/reminder.repository.ts`,
+  `src/http/appointments.controller.ts`
+- Create: `src/application/appointments/reschedule-appointment.ts`,
+  `src/application/appointments/cancel-appointment.ts`,
+  `src/http/dto/reschedule-appointment.dto.ts`,
+  `test/reschedule-cancel.e2e-spec.ts`
+
+**Interfaces:**
+- Produces:
+  - `hasStarted(a: Appointment, now: Date): boolean` (`startsAt <= now`).
+  - `rescheduleAppointment(a: Appointment, startsAt: Date): Appointment`
+    (`confirmed` → `scheduled`).
+  - `cancelAppointment(a: Appointment): Appointment`.
+  - `confirmAppointment(a: Appointment): Appointment`.
+  - `cancelReminder(r: Reminder): Reminder` (solo cambia si está `pending`;
+    `nextAttemptAt = null`).
+  - `ReminderRepository.lockPendingByAppointment(appointmentId: string): Promise<Reminder[]>`
+    (`FOR UPDATE`, sin `SKIP LOCKED`).
+  - `RescheduleAppointment.execute(id: string, startsAt: Date): Promise<AppointmentView>`.
+  - `CancelAppointment.execute(id: string): Promise<AppointmentView>`.
+
+- [ ] **Step 1: Escribir los tests que fallan.**
+
+```ts
+// src/domain/appointment.spec.ts
+expect(rescheduleAppointment({ ...a, status: 'confirmed' }, d).status).toBe('scheduled');
+expect(hasStarted({ ...a, startsAt: now }, now)).toBe(true);
+// test/reschedule-cancel.e2e-spec.ts
+it('reprogramar cancela el pendiente y crea otro', async () => {
+  // cita 2027-03-28T08:00:00Z → PATCH startsAt 2027-03-29T08:00:00Z
+  expect(res.body.reminders.map((r) => [r.status, r.scheduledFor])).toEqual([
+    ['cancelled', '2027-03-27T09:00:00Z'], ['pending', '2027-03-28T08:00:00Z']]);
+});
+it('reprogramar después de enviado deja el anterior en sent')  // usa el job de la tarea 7; se añade en esa tarea
+it('reprogramar dos veces en el mismo instante conserva el orden de creación', async () => {
+  expect(statuses).toEqual(['cancelled', 'cancelled', 'pending']);
+});
+it('PATCH de una cita cancelada → 409; de una que ya empezó → 409')
+it('PATCH con startsAt no futura → 400; inexistente o no UUID → 404')
+it('cancelar → 200 cancelled y el pendiente cancelled; repetirlo → 200 sin cambios')
+it('cancelar inexistente → 404')
+```
+
+- [ ] **Step 2: Verlos fallar.**
+- [ ] **Step 3: Implementar.**
+  - Ambos casos de uso, en una transacción: `appointments.lockById` (404 si no
+    hay), luego `reminders.lockPendingByAppointment`, y después aplican las
+    funciones del dominio.
+  - Reprogramar comprueba: cancelada o `hasStarted` → 409; `startsAt <= now`
+    → 400. Luego crea el recordatorio nuevo con `planReminder`.
+  - Cancelar una cita ya cancelada devuelve la vista sin escribir nada.
+- [ ] **Step 4: Verlos pasar.**
+- [ ] **Step 5: Commit, PR y merge.**
+
+### Task 7: Job de envío, reintentos, concurrencia y cierre ordenado
+
+Rama `feat/job-envio`.
+
+**Files:**
+- Create: `src/domain/retry-policy.ts`, `src/domain/provider-outcome.ts` (y
+  sus specs), `src/application/ports/message-provider.ts`,
+  `src/application/reminders/run-reminder-pass.ts`,
+  `src/infrastructure/provider/http-message-provider.ts`,
+  `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts`,
+  `test/reminder-job.e2e-spec.ts`
+- Modify: `src/domain/reminder.ts` (y su spec),
+  `src/application/ports/repositories.ts`,
+  `src/infrastructure/persistence/repositories/reminder.repository.ts`,
+  `test/reschedule-cancel.e2e-spec.ts` (el caso «después de enviado»)
+
+**Interfaces:**
+- Produces:
+  - `RETRY_DELAYS_MINUTES = [1, 5] as const`;
+    `MAX_ATTEMPTS = RETRY_DELAYS_MINUTES.length + 1`;
+    `nextRetryAt(attemptsMade: number, failedAt: Date): Date | null`.
+  - `type ProviderResult = { kind: 'response'; status: number } | { kind: 'network_error' } | { kind: 'timeout' }`.
+  - `type SendOutcome = 'delivered' | 'retry' | 'rejected'`;
+    `classifyProviderResult(r: ProviderResult): SendOutcome`.
+  - `skipReasonAtSendTime(input: { startsAt: Date; now: Date; phone: string | null; acceptsReminders: boolean }): SkipReason | null`.
+  - `skipReminder(r: Reminder, reason: SkipReason): Reminder`.
+  - `recordAttempt(r: Reminder, outcome: SendOutcome, ctx: { now: Date; to: string; sendSeq: number | null }): Reminder`.
+    Siempre suma 1 a `attempts`. `delivered` → `sent` con `sentAt = now`,
+    `sentTo`, `sendSeq` y `nextAttemptAt = null`. `rejected` → `failed`.
+    `retry` → `pending` con `nextAttemptAt = nextRetryAt(...)`, o `failed` si
+    devuelve `null`.
+  - `abstract class MessageProvider { abstract send(msg: { idempotencyKey: string; to: string; text: string }): Promise<ProviderResult> }`.
+  - `ReminderRepository.lockNextDue(now: Date, excludeIds: string[]): Promise<Reminder | null>`
+    (`status = 'pending'`, `next_attempt_at <= now`, `id not in excludeIds`,
+    ordenado por `next_attempt_at, id`, con `PESSIMISTIC_PARTIAL_WRITE`).
+  - `ReminderRepository.nextSendSequence(): Promise<number>`
+    (`select nextval('reminder_send_seq')`).
+  - `RunReminderPass.execute(signal?: AbortSignal): Promise<{ processed: number }>`.
+  - `ShutdownCoordinator { signal: AbortSignal; track<T>(p: Promise<T>): Promise<T> }`,
+    que en `onApplicationShutdown` aborta y espera a lo que esté en curso.
+
+- [ ] **Step 1: Escribir los tests unitarios que fallan.**
+
+```ts
+expect(nextRetryAt(1, new Date('2027-03-27T09:00:00Z'))).toEqual(new Date('2027-03-27T09:01:00Z'));
+expect(nextRetryAt(2, new Date('2027-03-27T09:01:00Z'))).toEqual(new Date('2027-03-27T09:06:00Z'));
+expect(nextRetryAt(3, new Date('2027-03-27T09:06:00Z'))).toBeNull();
+// classifyProviderResult: 202/200 → delivered; 503/504/500/network_error/timeout → retry; 422/400 → rejected
+// skipReasonAtSendTime: empezó (startsAt <= now) → too_late aunque además falte phone; phone null → no_phone; acceptsReminders false → opted_out
+```
+
+- [ ] **Step 2: Escribir los e2e que fallan.** Todos parten de una cita el
+  `2027-03-28T08:00:00Z` en Madrid, con el teléfono `+34600111222` y el envío
+  previsto `T = 2027-03-27T09:00:00Z`.
+
+```ts
+it('envía a su hora: sent, attempts 1, sentAt T y texto exacto', async () => {
+  await t.setClock('2027-03-27T09:00:00Z');
+  expect((await t.http.post('/jobs/reminders/run')).body).toEqual({ processed: 1 });
+  // reminders[0]: { status: 'sent', attempts: 1, sentAt: '2027-03-27T09:00:00Z' }
+  expect(await t.provider.messages('+34600111222')).toHaveLength(1); // text === buildReminderText(...)
+});
+it('antes de su hora no se procesa')                           // reloj 2027-03-27T08:59:59Z → { processed: 0 }
+it('503 y reintento al minuto')                                // rule unavailable 1 → pending attempts 1; T+1min → sent attempts 2
+it('504 con entrega perdida no duplica')                       // rule lost-response 1 → T+1min: sent; messages = 1; requests = 2 con la misma idempotencyKey
+it('tres fallos → failed; el tercero no sale antes de T+6min') // unavailable 3; en T+5min59s → processed 0; en T+6min → failed attempts 3
+it('422 → failed con attempts 1 y sin más llamadas')
+it('sin teléfono → skipped no_phone y opted_out → skipped opted_out, sin llamadas al proveedor')
+it('la cita empieza entre intentos → skipped too_late sin llamar', async () => {
+  // reloj 2027-03-10T10:00:00Z, cita 2027-03-10T10:00:30Z, unavailable 1 → run; reloj 2027-03-10T10:01:00Z → run
+  // reminders[0]: { status: 'skipped', skipReason: 'too_late', attempts: 1 }; requests = 1
+});
+it('5 pasadas concurrentes envían 10 recordatorios una sola vez', async () => {
+  const results = await Promise.all(Array.from({ length: 5 }, () => t.http.post('/jobs/reminders/run')));
+  expect(results.reduce((s, r) => s + r.body.processed, 0)).toBe(10);
+  // para cada uno de los 10 teléfonos: requests(to).length === 1
+});
+it('con la señal abortada no toma ningún recordatorio')        // RunReminderPass desde el contenedor con AbortSignal.abort() → { processed: 0 } y sigue pending
+```
+
+  En `reschedule-cancel.e2e-spec.ts`, completar el caso «reprogramar después de
+  enviado»: los recordatorios quedan `['sent', 'pending']`.
+- [ ] **Step 3: Verlos fallar.**
+- [ ] **Step 4: Implementar `RunReminderPass`.**
+
+```
+processed = 0; seen = []
+mientras no signal.aborted:
+  handled = transactions.run(repos =>
+    r = repos.reminders.lockNextDue(clock.now(), seen); si no hay → false
+    cita, paciente y clínica por id; now = clock.now()
+    reason = skipReasonAtSendTime(...) → si hay: update(skipReminder(r, reason)); true
+    tz = effectiveTimeZone(clinic.timezone, cita.virtual)
+    result = provider.send({ idempotencyKey: r.id, to: phone, text: buildReminderText(...) })
+    outcome = classifyProviderResult(result)
+    seq = outcome === 'delivered' ? repos.reminders.nextSendSequence() : null
+    update(recordAttempt(r, outcome, { now, to: phone, sendSeq: seq })); seen.push(r.id); true)
+  si !handled → salir; processed++
+```
+
+  - `HttpMessageProvider` hace POST a `${providerUrl}/messages` con
+    `Idempotency-Key` y `content-type: application/json`, y
+    `signal: AbortSignal.timeout(providerTimeoutMs)`. Un `TimeoutError` es
+    `timeout` y cualquier otro error de `fetch` es `network_error`.
+  - El controlador ejecuta
+    `coordinator.track(pass.execute(coordinator.signal))` y responde 200.
+- [ ] **Step 5: Verlos pasar** con `npm test` y `npm run test:e2e`.
+- [ ] **Step 6: Commit, PR y merge.**
+
+### Task 8: Webhook de respuestas
+
+Rama `feat/webhook`.
+
+**Files:**
+- Create: `src/domain/patient-reply.ts` (y su spec),
+  `src/application/inbound/handle-inbound-message.ts`,
+  `src/infrastructure/persistence/repositories/inbound-message.repository.ts`,
+  `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`,
+  `test/webhook.e2e-spec.ts`
+- Modify: `src/application/ports/repositories.ts`,
+  `src/infrastructure/persistence/repositories/appointment.repository.ts`
+
+**Interfaces:**
+- Produces:
+  - `parseReply(text: string): 'yes' | 'no' | null`.
+  - `InboundMessageRepository.insertIfNew(messageId: string, receivedAt: Date): Promise<boolean>`
+    (`insert ... on conflict do nothing`; devuelve `true` si insertó).
+  - `AppointmentRepository.lockLatestRepliable(phone: string, now: Date): Promise<Appointment | null>`.
+    Busca la cita del recordatorio `sent` con `sent_to = phone`, cuya cita no
+    esté `cancelled` y tenga `starts_at > now`, ordenado por `send_seq desc`
+    con `limit 1`, y bloquea la fila de la cita con `FOR UPDATE`.
+  - `HandleInboundMessage.execute(input: { messageId: string; from: string; text: string; receivedAt: Date }): Promise<void>`.
+
+- [ ] **Step 1: Escribir los tests que fallan.**
+
+```ts
+// patient-reply.spec.ts
+for (const t of ['Sí', 'si.', 'SI', '  sí  ', '¡SÍ!']) expect(parseReply(t)).toBe('yes');
+for (const t of ['NO!', 'no', 'No.']) expect(parseReply(t)).toBe('no');
+for (const t of ['Sí, gracias', 'sip', 'n o', '', 'SI NO']) expect(parseReply(t)).toBeNull();
+// test/webhook.e2e-spec.ts (tras enviar el recordatorio como en la tarea 7)
+it('SI confirma la cita')
+it('NO cancela la cita y su recordatorio pendiente')       // reprogramar tras el envío → NO → cita cancelled, nuevo cancelled
+it('el mismo messageId solo se procesa una vez')           // SI (m1) → PATCH (vuelve a scheduled) → SI (m1) → sigue scheduled
+it('SI y luego reprogramar deja la cita scheduled')
+it('«Sí, gracias» se ignora con 200')
+it('teléfono sin citas → 200 y nada cambia')
+it('teléfono compartido en la misma pasada: aplica a la última enviada', async () => {
+  // dos pacientes con +34600111222, citas A (creada antes) y B; un run las envía con el mismo sentAt
+  // NO → B cancelled, A scheduled
+});
+it('ignora citas que ya empezaron y cae en la anterior si la última está cancelada')
+it('cuerpo sin messageId → 400 { error }')
+```
+
+- [ ] **Step 2: Verlos fallar.**
+- [ ] **Step 3: Implementar.**
+  - `parseReply`: `normalize('NFD')`, quitar `\p{M}`, quitar
+    `^[^\p{L}]+|[^\p{L}]+$` (con flag `u`), pasar a minúsculas y comparar con
+    `si` o `no`.
+  - En una transacción: si `insertIfNew` devuelve `false` → fin. Si
+    `parseReply` da `null` → fin. Si `lockLatestRepliable` no encuentra cita →
+    fin.
+    - `yes` → `confirmAppointment`.
+    - `no` → `cancelAppointment` y `cancelReminder` sobre
+      `lockPendingByAppointment`.
+  - Siempre responde 200.
+- [ ] **Step 4: Verlos pasar.**
+- [ ] **Step 5: Commit, PR y merge.**
+
+### Task 9: Entrega: README, nota de producción, agentes y humo
+
+Rama `docs/entrega`.
+
+**Files:**
+- Create: `scripts/smoke.sh`, `.claude/skills/verificar/SKILL.md`
+- Modify: `README.md`, `AGENTS.md`, `CLAUDE.md`, `.github/workflows/ci.yml`,
+  `docs/2026-11-23-recordatorios-design.md` (Estado)
+
+- [ ] **Step 1: `scripts/smoke.sh`.** Con `docker compose` levantado, recorre:
+  `PUT /test/clock` → crear clínica → paciente → cita → mover el reloj a la hora
+  de envío → `POST /jobs/reminders/run` → comprobar `{"processed":1}` y un
+  mensaje en `localhost:4010/admin/messages`. Sale con código distinto de 0 si
+  algo no cuadra. El job `compose` del CI lo ejecuta.
+- [ ] **Step 2: README** con los apartados que pide el enunciado:
+  1. cómo levantarlo y pasar los tests;
+  2. decisiones: arquitectura, duplicados, zonas horarias, qué se descartó y
+     las ambigüedades de la sección 1;
+  3. qué quedó fuera;
+  4. nota de producción de una página: 20 000 recordatorios al día con el pico
+     de las 09:00 que provoca la franja, cron cada minuto con varias réplicas
+     sobre `SKIP LOCKED`, la evolución a reserva con `locked_until` u outbox con
+     cola, plantillas y ventana de 24 h de WhatsApp, firma del webhook,
+     despliegue gradual con cierre ordenado y migraciones compatibles, y
+     métricas y alertas (retraso entre `scheduledFor` y `sentAt`, tasas de
+     `failed`/`skipped`, latencia y errores del proveedor);
+  5. uso de la IA y qué se corrigió.
+- [ ] **Step 3: Versión final de `AGENTS.md`, `CLAUDE.md` y de la skill
+  `verificar`**, que ejecuta lint, tipos, tests unitarios, e2e y el humo.
+- [ ] **Step 4: Verificar.** `npm run lint && npx tsc --noEmit && npm test && npm run test:e2e`
+  sin errores. Además `docker compose up --build -d --wait && ./scripts/smoke.sh`
+  termina con código 0.
+- [ ] **Step 5: Commit, PR y merge.** Actualizar Estado con los enlaces a las
+  PR.
+
+## 4. Estado
+
+- 2026-11-23: repositorio base clonado (commit `c5a8515`), sin cambios propios
+  ni repositorio público todavía.
+- 2026-11-23: leídos `enunciado.pdf`, `openapi.yaml`, `provider/server.mjs` y
+  `docker-compose.yml`; corregido el resumen de la sección 1 (contrato,
+  `no_phone`/`opted_out` evaluados al enviar, reprogramar aunque ya se hubiera
+  enviado, NO cancela también el recordatorio, webhook con 400 por esquema,
+  reloj sin modo test = 404, «dos llamadas para el mismo intento») y listadas
+  las ambigüedades. Siguiente paso: decidir tecnologías y escribir el plan.
+- 2026-11-23: decidido el stack (Nest 12 en ESM, MikroORM 7, Vitest), el campo
+  opcional `virtual` y el trabajo con ramas, PR y CI obligatorio. Añadidas la
+  tabla de indicaciones del expositor, las ambigüedades resueltas y el plan
+  (tareas 0 a 9). Sin código ni commits todavía. Siguiente paso: revisar el
+  plan y autorizar la tarea 0 (crear el repositorio público).
+- 2026-11-23: redactados `AGENTS.md` y `CLAUDE.md` (sin commit) a partir de
+  las reglas y los incidentes de otros proyectos, y revisados por un segundo
+  modelo. `AGENTS.md` lleva un
+  mapa regla → archivo → test, un protocolo de cambio, `npm run verify` como
+  definición de terminado, los invariantes con su porqué y las trampas del
+  stack. `CLAUDE.md` importa `AGENTS.md` y solo añade lo propio de Claude Code.
+  La revisión corrigió el plan:
+  - la plantilla de Nest 12 en ESM usa oxlint, no ESLint;
+  - la plantilla genera su propio `AGENTS.md`/`CLAUDE.md`, que no deben pisar
+    los del repo;
+  - los controladores de `/health` y `/test/clock` pasan a `infrastructure`,
+    porque usan MikroORM y `TestClock`;
+  - se añaden `test/architecture.spec.ts` y los scripts `verify`, `typecheck`
+    y `db:up`.
+
+  Además se decidió que la respuesta solo incluya `virtual` cuando vale
+  `true`, para que los tests contra el contrato no vean campos de más. Los
+  commits y las PR no llevan atribución de herramienta; el uso de IA se cuenta
+  en el README. Siguiente paso: autorizar la tarea 0.
+- 2026-11-24: tarea 0 hecha. Repositorio público
+  https://github.com/aarondevl/clinicsay-backend-challenge con `main` en
+  `c5a8515` (comprobado con `git ls-remote origin main`); el repositorio de la
+  prueba queda como `upstream`. `AGENTS.md`, `CLAUDE.md` y `docs/` siguen sin
+  commit y entran con la PR de la tarea 1. Siguiente paso: tarea 1, rama
+  `feat/andamiaje`.
+- 2026-11-24: tarea 1 implementada en `feat/andamiaje`. Cambios respecto al
+  plan:
+  - `TestClockController` vive en `src/http` y fija la hora con el puerto
+    `SettableClock` de `application`; en `infrastructure` habría necesitado el
+    validador de `src/http`, que esa capa no puede importar;
+  - `src/application/errors.ts` se crea ya aquí porque el filtro de errores
+    lo usa (el plan lo ponía en la tarea 3);
+  - se descartan de la plantilla `@nestjs/observe`, `@nestjs/mau`, el script
+    `deploy` y las skills genéricas de `.claude/` y `.agents/`;
+  - tests añadidos al brief: `loadConfig`, `TestClock` congelado y JSON mal
+    formado → 400 `{ error }`.
