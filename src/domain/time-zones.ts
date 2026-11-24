@@ -1,4 +1,4 @@
-import { DateTime } from 'luxon';
+import { DateTime, IANAZone } from 'luxon';
 
 /**
  * Zona de las citas virtuales: la hora peninsular, sea cual sea la zona de la
@@ -31,4 +31,17 @@ export function localDateTime(instant: Date, timeZone: string): DateTime {
   const local = DateTime.fromJSDate(instant, { zone: timeZone });
   if (!local.isValid) throw new Error(`invalid time zone: ${timeZone}`);
   return local;
+}
+
+// Intl acepta offsets fijos (`+01:00`) como zona, pero no son zonas IANA ni
+// tienen cambio de horario.
+const UTC_OFFSET = /^[+-]/;
+
+/**
+ * Dice si `zone` es una zona IANA que existe (`Europe/Madrid`,
+ * `Atlantic/Canary`). Rechaza `local` y `system`, que dependen de la máquina,
+ * y los offsets fijos como `+01:00`.
+ */
+export function isValidTimeZone(zone: string): boolean {
+  return !UTC_OFFSET.test(zone) && IANAZone.isValidZone(zone);
 }
