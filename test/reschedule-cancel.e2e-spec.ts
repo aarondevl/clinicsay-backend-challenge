@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { IdGenerator } from '../src/application/ports/id-generator.js';
 import { Transactions } from '../src/application/ports/transactions.js';
@@ -15,6 +16,9 @@ import {
 const NOW = '2027-03-01T00:00:00Z';
 // 10:00 de Madrid el día del cambio de horario; recordatorio el 27 a las 09:00Z.
 const STARTS_AT = '2027-03-28T08:00:00Z';
+
+const UUID_V7 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Lo que tarda como mucho una consulta sin bloqueo en la base de los e2e. */
 const UNBLOCKED_MS = 200;
@@ -259,6 +263,281 @@ describe('reprogramar y cancelar', () => {
       expect(listed).toEqual([
         expect.objectContaining({ status: 'cancelled', nextAttemptAt: null }),
       ]);
+    });
+  });
+
+  /** Pone la cita en `status` por el repositorio (sin webhook todavía). */
+  async function setStatus(
+    id: string,
+    status: Appointment['status'],
+  ): Promise<void> {
+    const appointment = await storedAppointment(id);
+    await transactions.run((repos) =>
+      repos.appointments.update({ ...appointment, status }),
+    );
+  }
+
+  const patch = (id: string, body: object) =>
+    t.http.patch(`/appointments/${id}`).send(body);
+  const cancel = (id: string) => t.http.post(`/appointments/${id}/cancel`);
+
+  describe('PATCH /appointments/{id}', () => {
+    it('cancela el pendiente, crea otro para la hora nueva y responde 200 con la cita', async () => {
+      const created = await madridAppointment();
+      const res = await patch(created.id, { startsAt: '2027-03-29T08:00:00Z' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        id: created.id,
+        clinicId: created.clinicId,
+        patientId: created.patientId,
+        startsAt: '2027-03-29T08:00:00Z',
+        status: 'scheduled',
+        reminders: [
+          {
+            id: created.reminders[0]?.id,
+            scheduledFor: '2027-03-27T09:00:00Z',
+            status: 'cancelled',
+            attempts: 0,
+            sentAt: null,
+            skipReason: null,
+          },
+          {
+            id: expect.stringMatching(UUID_V7),
+            // 10:00 de Madrid (ya en horario de verano) del día anterior.
+            scheduledFor: '2027-03-28T08:00:00Z',
+            status: 'pending',
+            attempts: 0,
+            sentAt: null,
+            skipReason: null,
+          },
+        ],
+      });
+      expect(res.body).not.toHaveProperty('virtual');
+      const got = await t.http.get(`/appointments/${created.id}`);
+      expect(got.body).toEqual(res.body);
+    });
+
+    it('reprogramar dos veces sin mover el reloj lista los recordatorios en orden de creación', async () => {
+      const created = await madridAppointment();
+      await patch(created.id, { startsAt: '2027-03-29T08:00:00Z' }).expect(200);
+      const res = await patch(created.id, {
+        startsAt: '2027-03-30T08:00:00Z',
+      }).expect(200);
+      const reminders = (res.body as AppointmentBody).reminders;
+      expect(reminders.map((r) => [r.status, r.scheduledFor])).toEqual([
+        ['cancelled', '2027-03-27T09:00:00Z'],
+        ['cancelled', '2027-03-28T08:00:00Z'],
+        ['pending', '2027-03-29T08:00:00Z'],
+      ]);
+      expect(reminders[0]?.id).toBe(created.reminders[0]?.id);
+    });
+
+    it('una cita confirmed vuelve a scheduled', async () => {
+      const created = await madridAppointment();
+      await setStatus(created.id, 'confirmed');
+      const res = await patch(created.id, { startsAt: '2027-03-29T08:00:00Z' });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ status: 'scheduled' });
+    });
+
+    it('si con la hora nueva ya no da tiempo, el recordatorio nuevo nace skipped too_late', async () => {
+      const created = await madridAppointment();
+      // 22:30 en Madrid: la franja lleva el envío a las 09:00 (08:00Z), tras el inicio.
+      await t.setClock('2027-03-10T21:30:00Z');
+      const res = await patch(created.id, { startsAt: '2027-03-11T07:30:00Z' });
+      expect(res.status).toBe(200);
+      expect(
+        (res.body as AppointmentBody).reminders.map((r) => [
+          r.status,
+          r.skipReason,
+          r.scheduledFor,
+        ]),
+      ).toEqual([
+        ['cancelled', null, '2027-03-27T09:00:00Z'],
+        ['skipped', 'too_late', '2027-03-11T08:00:00Z'],
+      ]);
+    });
+
+    it('una cita virtual se reprograma con la hora de Madrid', async () => {
+      const clinic = await createClinic(t, { timezone: 'Atlantic/Canary' });
+      const patient = await createPatient(t, clinic.id);
+      const created = await createAppointment(
+        t,
+        clinic.id,
+        patient.id,
+        STARTS_AT,
+        { virtual: true },
+      );
+      // 09:30 de Madrid el día anterior; en Canarias (08:30) caería en la franja.
+      const res = await patch(created.id, { startsAt: '2027-03-11T08:30:00Z' });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ virtual: true });
+      expect((res.body as AppointmentBody).reminders[1]).toMatchObject({
+        status: 'pending',
+        scheduledFor: '2027-03-10T08:30:00Z',
+      });
+    });
+
+    it('varios PATCH a la vez sobre la misma cita dejan un solo pendiente', async () => {
+      const created = await madridAppointment();
+      const days = ['29', '30', '31'];
+      const responses = await Promise.all(
+        days.map((day) =>
+          patch(created.id, { startsAt: `2027-03-${day}T08:00:00Z` }),
+        ),
+      );
+      expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+      const got = await t.http.get(`/appointments/${created.id}`);
+      const statuses = (got.body as AppointmentBody).reminders.map(
+        (r) => r.status,
+      );
+      expect(statuses).toEqual([
+        'cancelled',
+        'cancelled',
+        'cancelled',
+        'pending',
+      ]);
+    });
+
+    it('con una cita cancelada responde 409 { error }, aunque startsAt no sea futura', async () => {
+      const created = await madridAppointment();
+      await cancel(created.id).expect(200);
+      for (const startsAt of ['2027-03-29T08:00:00Z', '2027-02-01T08:00:00Z']) {
+        const res = await patch(created.id, { startsAt });
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({ error: 'appointment is cancelled' });
+      }
+    });
+
+    it.each([
+      ['empieza justo ahora', STARTS_AT],
+      ['empezó antes', '2027-03-28T09:00:00Z'],
+    ])(
+      'con una cita que %s responde 409 { error }, aunque startsAt no sea futura',
+      async (_label, now) => {
+        const created = await madridAppointment();
+        await t.setClock(now);
+        for (const startsAt of ['2027-04-01T08:00:00Z', NOW]) {
+          const res = await patch(created.id, { startsAt });
+          expect(res.status).toBe(409);
+          expect(res.body).toEqual({
+            error: 'appointment has already started',
+          });
+        }
+      },
+    );
+
+    it.each([
+      ['pasada', '2027-02-28T10:00:00Z'],
+      ['igual a la hora del servicio', NOW],
+    ])(
+      'con startsAt %s responde 400 { error } y no cambia nada',
+      async (_label, startsAt) => {
+        const created = await madridAppointment();
+        const res = await patch(created.id, { startsAt });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({ error: 'startsAt must be in the future' });
+        const got = await t.http.get(`/appointments/${created.id}`);
+        expect(got.body).toEqual(created);
+      },
+    );
+
+    it.each([
+      ['que no existe', randomUUID()],
+      ['que no es UUID', 'abc'],
+    ])('con un id %s responde 404 { error }', async (_label, id) => {
+      const res = await patch(id, { startsAt: '2027-03-29T08:00:00Z' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'appointment not found' });
+    });
+
+    it.each([
+      ['startsAt sin zona', { startsAt: '2027-03-29T10:00:00' }],
+      ['startsAt que no es fecha', { startsAt: 'mañana' }],
+      ['startsAt ausente', {}],
+      ['startsAt a null', { startsAt: null }],
+      ['startsAt como número', { startsAt: 1806307200000 }],
+      ['startsAt sin fecha', { startsAt: '10:00:00Z' }],
+    ])('con %s responde 400 { error }', async (_label, body) => {
+      const created = await madridAppointment();
+      const res = await patch(created.id, body);
+      expect(res.status).toBe(400);
+      expect(Object.keys(res.body)).toEqual(['error']);
+    });
+
+    it('valida el cuerpo antes de buscar la cita (400 antes que 404)', async () => {
+      const res = await patch('abc', { startsAt: '2027-03-29T10:00:00' });
+      expect(res.status).toBe(400);
+      expect(Object.keys(res.body)).toEqual(['error']);
+    });
+  });
+
+  describe('POST /appointments/{id}/cancel', () => {
+    it('cancela la cita y su pendiente y responde 200 con la cita', async () => {
+      const created = await madridAppointment();
+      const res = await cancel(created.id);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ...created,
+        status: 'cancelled',
+        reminders: [{ ...created.reminders[0], status: 'cancelled' }],
+      });
+      const got = await t.http.get(`/appointments/${created.id}`);
+      expect(got.body).toEqual(res.body);
+    });
+
+    it('repetirlo responde 200 con la misma cita', async () => {
+      const created = await madridAppointment();
+      const first = await cancel(created.id).expect(200);
+      const again = await cancel(created.id);
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual(first.body);
+    });
+
+    it('un recordatorio que no está pendiente se queda como está', async () => {
+      const clinic = await createClinic(t);
+      const patient = await createPatient(t, clinic.id);
+      await t.setClock('2027-03-10T21:30:00Z');
+      const created = await createAppointment(
+        t,
+        clinic.id,
+        patient.id,
+        '2027-03-11T07:30:00Z',
+      );
+      expect(created.reminders[0]?.status).toBe('skipped');
+      const res = await cancel(created.id).expect(200);
+      expect(res.body).toEqual({
+        ...created,
+        status: 'cancelled',
+        reminders: created.reminders,
+      });
+    });
+
+    it.each(['confirmed', 'scheduled'] as const)(
+      'cancela una cita %s',
+      async (status) => {
+        const created = await madridAppointment();
+        await setStatus(created.id, status);
+        const res = await cancel(created.id).expect(200);
+        expect(res.body).toMatchObject({ status: 'cancelled' });
+      },
+    );
+
+    it('cancela una cita que ya empezó (el contrato solo prevé 200 y 404)', async () => {
+      const created = await madridAppointment();
+      await t.setClock('2027-03-28T09:00:00Z');
+      const res = await cancel(created.id);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ status: 'cancelled' });
+    });
+
+    it.each([
+      ['que no existe', randomUUID()],
+      ['que no es UUID', 'abc'],
+    ])('con un id %s responde 404 { error }', async (_label, id) => {
+      const res = await cancel(id);
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'appointment not found' });
     });
   });
 });
