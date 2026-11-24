@@ -1,4 +1,29 @@
-import { isIsoDateTimeWithZone } from './validation.js';
+import {
+  isIsoDateTimeWithZone,
+  parseIsoDateTimeWithZone,
+} from './validation.js';
+
+describe('parseIsoDateTimeWithZone', () => {
+  it('convierte una fecha con offset en su instante', () => {
+    expect(parseIsoDateTimeWithZone('2027-03-28T10:00:00+02:00')).toEqual(
+      new Date('2027-03-28T08:00:00Z'),
+    );
+  });
+
+  it('convierte también las formas ISO que acepta el validador y Date no entiende', () => {
+    // Fecha ordinal: día 87 de 2027 (28 de marzo).
+    expect(isIsoDateTimeWithZone('2027-087T10:00:00Z')).toBe(true);
+    expect(parseIsoDateTimeWithZone('2027-087T10:00:00Z')).toEqual(
+      new Date('2027-03-28T10:00:00Z'),
+    );
+  });
+
+  it('lanza si la fecha no tiene zona en vez de usar la de la máquina', () => {
+    expect(() => parseIsoDateTimeWithZone('2027-03-28T10:00:00')).toThrow(
+      'not an ISO 8601 date-time with a time zone',
+    );
+  });
+});
 
 describe('isIsoDateTimeWithZone', () => {
   it('acepta una fecha en UTC con Z', () => {

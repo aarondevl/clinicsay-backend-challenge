@@ -18,6 +18,25 @@ export function isIsoDateTimeWithZone(value: unknown): boolean {
   );
 }
 
+/**
+ * Convierte en instante una fecha que ya pasó `@IsIsoDateTimeWithZone()`.
+ * Usa el mismo parser que el validador: `new Date()` no entiende todas las
+ * formas ISO que este acepta (fechas ordinales o de semana) y daría una fecha
+ * inválida.
+ *
+ * @throws Error si `value` no tiene zona o no es una fecha ISO 8601. Es un
+ * fallo de programación (el DTO la valida antes), así que el filtro da 500.
+ */
+export function parseIsoDateTimeWithZone(value: string): Date {
+  if (!isIsoDateTimeWithZone(value)) {
+    throw new Error(
+      `not an ISO 8601 date-time with a time zone: ${JSON.stringify(value)}`,
+    );
+  }
+  return DateTime.fromISO(value, { setZone: true }).toJSDate();
+}
+
+/** Decorador de DTO para {@link isIsoDateTimeWithZone}. */
 export function IsIsoDateTimeWithZone(
   options?: ValidationOptions,
 ): PropertyDecorator {
