@@ -270,6 +270,24 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   día le pondría el 1, y un año de 5 cifras acababa en 500.
   `parseIsoDateTimeWithZone`, en el mismo archivo, convierte con el mismo
   parser y lanza en vez de completar una fecha.
+- **Reprogramar y cancelar (2026-11-24):**
+  - los dos casos de uso bloquean primero la cita (`FOR UPDATE`) y después
+    sus pendientes (`FOR UPDATE` sin `SKIP LOCKED`). Dos `PATCH` a la vez se
+    ponen en fila en la cita y el segundo cancela el pendiente que creó el
+    primero; sin ese bloqueo, el segundo insertaba otro pendiente y el
+    índice `reminder_one_pending` lo rechazaba con un 500. Las tareas 7 y 8
+    siguen el mismo orden;
+  - `PATCH` comprueba `isId` antes de abrir la transacción, como
+    `GetAppointment`, y después cancelada o empezada (409) antes que
+    `startsAt` no futura (400): una cita que no se puede reprogramar da 409
+    aunque la hora nueva tampoco valga;
+  - cancelar una cita que ya empezó responde 200 y la cancela: el contrato de
+    `/cancel` solo prevé 200 y 404. Una ya cancelada se devuelve sin
+    escribir;
+  - los repositorios de citas y recordatorios leen sin identity map
+    (`disableIdentityMap`). Escriben con sentencias directas, y con identity
+    map una lectura posterior en la misma transacción devolvía la fila vieja
+    (`findOne` ni consulta y `find` no pisa un valor con `null`).
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
