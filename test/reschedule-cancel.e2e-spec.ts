@@ -293,6 +293,26 @@ describe('reprogramar y cancelar', () => {
       expect(got.body).toEqual(res.body);
     });
 
+    it('reprogramar después de enviado deja el enviado sent y crea otro pendiente', async () => {
+      const created = await madridAppointment();
+      await t.setClock('2027-03-27T09:00:00Z');
+      await t.http.post('/jobs/reminders/run').expect(200, { processed: 1 });
+      const res = await patch(created.id, { startsAt: '2027-03-29T08:00:00Z' });
+      expect(res.status).toBe(200);
+      expect(
+        appointmentBody(res).reminders.map((r) => [
+          r.status,
+          r.scheduledFor,
+          r.attempts,
+          r.sentAt,
+        ]),
+      ).toEqual([
+        ['sent', '2027-03-27T09:00:00Z', 1, '2027-03-27T09:00:00Z'],
+        // 10:00 de Madrid (CEST) del día anterior a la hora nueva.
+        ['pending', '2027-03-28T08:00:00Z', 0, null],
+      ]);
+    });
+
     it('reprogramar dos veces sin mover el reloj lista los recordatorios en orden de creación', async () => {
       const created = await madridAppointment();
       await patch(created.id, { startsAt: '2027-03-29T08:00:00Z' }).expect(200);
