@@ -1,4 +1,6 @@
+import type { SendOutcome } from './provider-outcome.js';
 import type { ReminderPlan } from './reminder-schedule.js';
+import { nextRetryAt } from './retry-policy.js';
 
 /** Estado de un recordatorio. Solo `pending` se puede enviar. */
 export type ReminderStatus =
@@ -62,4 +64,91 @@ export function newReminder(
 export function cancelReminder(reminder: Reminder): Reminder {
   if (reminder.status !== 'pending') return reminder;
   return { ...reminder, status: 'cancelled', nextAttemptAt: null };
+}
+
+/**
+ * Dice si un recordatorio que toca enviar se descarta, y por qué. Se evalúa
+ * en cada intento, con la hora del servicio, y en este orden: `too_late` si
+ * la cita ya empezó (`startsAt <= now`, como `hasStarted`), `no_phone` si el
+ * paciente no tiene teléfono y `opted_out` si se dio de baja.
+ *
+ * @param input.now Hora del servicio (puerto `Clock`).
+ * @returns El motivo, o `null` si se puede llamar al proveedor.
+ */
+export function skipReasonAtSendTime(input: {
+  startsAt: Date;
+  now: Date;
+  phone: string | null;
+  acceptsReminders: boolean;
+}): SkipReason | null {
+  if (input.startsAt <= input.now) return 'too_late';
+  if (input.phone === null) return 'no_phone';
+  if (!input.acceptsReminders) return 'opted_out';
+  return null;
+}
+
+/**
+ * Descarta un recordatorio pendiente: queda `skipped` con `reason` y sin
+ * próximo intento. Conserva `attempts`: un reintento descartado sigue
+ * contando las llamadas que ya se hicieron.
+ *
+ * @throws Error si no está `pending` (fallo de programación: el job solo
+ * descarta lo que tiene bloqueado y pendiente).
+ */
+export function skipReminder(reminder: Reminder, reason: SkipReason): Reminder {
+  assertPending(reminder);
+  return {
+    ...reminder,
+    status: 'skipped',
+    skipReason: reason,
+    nextAttemptAt: null,
+  };
+}
+
+/**
+ * Apunta una llamada al proveedor y su resultado; siempre suma 1 a
+ * `attempts`. `delivered` lo deja `sent` (con `sentAt`, `sentTo` y
+ * `sendSeq`), `rejected` lo deja `failed`, y `retry` lo deja `pending` para
+ * el siguiente intento de la política de reintentos, o `failed` si ya no
+ * quedan. `scheduledFor` no cambia nunca.
+ *
+ * @param ctx.now Hora del servicio en que respondió (o falló) el proveedor.
+ * @param ctx.to Teléfono al que se envió.
+ * @param ctx.sendSeq Número de envío (secuencia `reminder_send_seq`); solo
+ * con `delivered`.
+ * @throws Error si no está `pending`, o si es `delivered` sin `sendSeq`
+ * (fallos de programación).
+ */
+export function recordAttempt(
+  reminder: Reminder,
+  outcome: SendOutcome,
+  ctx: { now: Date; to: string; sendSeq: number | null },
+): Reminder {
+  assertPending(reminder);
+  const attempts = reminder.attempts + 1;
+  if (outcome === 'delivered') {
+    if (ctx.sendSeq === null) {
+      throw new Error(`reminder ${reminder.id} delivered without send seq`);
+    }
+    return {
+      ...reminder,
+      status: 'sent',
+      attempts,
+      nextAttemptAt: null,
+      sentAt: ctx.now,
+      sentTo: ctx.to,
+      sendSeq: ctx.sendSeq,
+    };
+  }
+  const retryAt = outcome === 'retry' ? nextRetryAt(attempts, ctx.now) : null;
+  if (retryAt === null) {
+    return { ...reminder, status: 'failed', attempts, nextAttemptAt: null };
+  }
+  return { ...reminder, attempts, nextAttemptAt: retryAt };
+}
+
+function assertPending(reminder: Reminder): void {
+  if (reminder.status !== 'pending') {
+    throw new Error(`reminder ${reminder.id} is ${reminder.status}`);
+  }
 }

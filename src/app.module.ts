@@ -8,17 +8,22 @@ import { CreateClinic } from './application/clinics/create-clinic.js';
 import { CreatePatient } from './application/patients/create-patient.js';
 import { Clock, SettableClock } from './application/ports/clock.js';
 import { IdGenerator } from './application/ports/id-generator.js';
+import { MessageProvider } from './application/ports/message-provider.js';
 import { Transactions } from './application/ports/transactions.js';
+import { RunReminderPass } from './application/reminders/run-reminder-pass.js';
 import type { AppConfig } from './config/app-config.js';
 import { AppointmentsController } from './http/appointments.controller.js';
 import { ClinicsController } from './http/clinics.controller.js';
+import { JobsController } from './http/jobs.controller.js';
 import { PatientsController } from './http/patients.controller.js';
+import { ShutdownCoordinator } from './http/shutdown-coordinator.js';
 import { TestClockController } from './http/test-clock.controller.js';
 import { SystemClock } from './infrastructure/clock/system-clock.js';
 import { TestClock } from './infrastructure/clock/test-clock.js';
 import { UuidV7IdGenerator } from './infrastructure/ids/uuid-v7-id-generator.js';
 import { MikroOrmTransactions } from './infrastructure/persistence/mikro-orm-transactions.js';
 import { PersistenceModule } from './infrastructure/persistence/persistence.module.js';
+import { HttpMessageProvider } from './infrastructure/provider/http-message-provider.js';
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
 
@@ -29,6 +34,12 @@ const portProviders: Provider[] = [
     provide: Transactions,
     useFactory: (orm: MikroORM) => new MikroOrmTransactions(orm),
     inject: [MikroORM],
+  },
+  {
+    provide: MessageProvider,
+    useFactory: (config: AppConfig) =>
+      new HttpMessageProvider(config.providerUrl, config.providerTimeoutMs),
+    inject: [APP_CONFIG],
   },
 ];
 
@@ -70,6 +81,15 @@ const useCaseProviders: Provider[] = [
       new CancelAppointment(transactions),
     inject: [Transactions],
   },
+  {
+    provide: RunReminderPass,
+    useFactory: (
+      transactions: Transactions,
+      clock: Clock,
+      provider: MessageProvider,
+    ) => new RunReminderPass(transactions, clock, provider),
+    inject: [Transactions, Clock, MessageProvider],
+  },
 ];
 
 /** Composición de la app: aquí se eligen las implementaciones de los puertos. */
@@ -95,6 +115,7 @@ export class AppModule {
         ClinicsController,
         PatientsController,
         AppointmentsController,
+        JobsController,
         ...(testMode ? [TestClockController] : []),
       ],
       providers: [
@@ -102,6 +123,7 @@ export class AppModule {
         ...clockProviders,
         ...portProviders,
         ...useCaseProviders,
+        ShutdownCoordinator,
       ],
     };
   }

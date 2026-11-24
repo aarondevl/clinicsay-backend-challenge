@@ -294,6 +294,36 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     (`disableIdentityMap`). Escriben con sentencias directas, y con identity
     map una lectura posterior en la misma transacción devolvía la fila vieja
     (`findOne` ni consulta y `find` no pisa un valor con `null`).
+- **Job de envío (2026-11-24):**
+  - la pasada toma cada recordatorio con `lockNextDue` (`FOR UPDATE SKIP
+    LOCKED`, por `next_attempt_at` e id) y lee cita, paciente y clínica sin
+    bloquearlas (ver «Reprogramar y cancelar»). Una transacción por
+    recordatorio, con la llamada al proveedor dentro y el resultado guardado
+    antes del `COMMIT`; `sendSeq` se pide a `reminder_send_seq` solo al quedar
+    `sent`;
+  - `too_late` se mira con la hora del servicio antes de llamar; `sentAt` y
+    la hora desde la que cuenta el reintento son la del servicio después de
+    la llamada, porque `sentAt` es «cuando el proveedor lo aceptó» y el
+    reintento va «1 minuto después del fallo». Con el reloj de test es la
+    misma hora;
+  - 200 y 202 son `sent`, y también cualquier otro 2xx: un proveedor real
+    que acepte con 201 o 204 no debe dejar `failed` un mensaje entregado.
+    Cualquier 4xx es `failed`, y lo demás (5xx, error de red, timeout, 1xx y
+    3xx) se reintenta, que con la misma `Idempotency-Key` es seguro. El
+    timeout (`AbortSignal.timeout`) cubre también la lectura del cuerpo;
+  - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
+    fallidos y descartados;
+  - un error dentro de la transacción de un recordatorio corta la pasada
+    (500, o 503 con la base caída). Lo que no llegó a confirmarse sigue
+    pendiente con sus intentos anteriores y la siguiente pasada lo repite con
+    la misma clave, sin duplicar el mensaje;
+  - el cierre ordenado aborta la señal y espera en
+    `beforeApplicationShutdown`. En `onApplicationShutdown` llegaría tarde:
+    antes Nest cierra el servidor HTTP, que espera a la petición del job, y
+    la pasada sin abortar seguiría hasta vaciar la cola (reproducido: trataba
+    2 recordatorios en vez de 1). Node ya espera a las peticiones HTTP en
+    curso y el pool de `pg` a que la transacción suelte su conexión, pero el
+    coordinador no depende de esos detalles.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
@@ -1420,3 +1450,77 @@ Rama `docs/entrega`.
   añade «reprogramar después de enviado» y usa `ReminderRepository.update`;
   la tarea 8 usa `confirmAppointment`, `cancelAppointment`, `cancelReminder`
   y el orden cita → pendientes.
+- 2026-11-24: tarea 7 implementada en `feat/job-envio`. Entran
+  `POST /jobs/reminders/run` con `RunReminderPass` y `JobsController`, el
+  puerto `MessageProvider` con `HttpMessageProvider`, `ShutdownCoordinator`,
+  `retry-policy.ts` (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`, `nextRetryAt`),
+  `provider-outcome.ts` (`ProviderResult`, `classifyProviderResult`),
+  `skipReasonAtSendTime`, `skipReminder` y `recordAttempt` en `reminder.ts`,
+  `ReminderRepository.lockNextDue`/`nextSendSequence`,
+  `test/reminder-job.e2e-spec.ts` y el caso «reprogramar después de
+  enviado». Sin migraciones ni dependencias nuevas. Cambios respecto al plan:
+  - el coordinador aborta y espera en `beforeApplicationShutdown`, no en
+    `onApplicationShutdown`: antes Nest cierra el servidor HTTP, que espera a
+    la petición del job, y una pasada sin abortar vaciaba la cola
+    (reproducido con una mutación);
+  - `sentAt` y la hora del fallo son `clock.now()` después de la llamada al
+    proveedor; `too_late` se mira antes;
+  - cualquier 2xx es `sent` (el plan solo nombraba 202 y 200), y 1xx y 3xx
+    se reintentan;
+  - `skipReminder`, `recordAttempt` y `nextRetryAt` lanzan un `Error` simple
+    ante un fallo de programación (no pendiente, `delivered` sin `sendSeq`,
+    intentos no positivos);
+  - el timeout se prueba con un modo nuevo del proxy TCP,
+    `dropResponses(true)`, que deja llegar la petición y descarta la
+    respuesta y el cierre de la conexión. Así es determinista y prueba
+    además «puede haberse entregado» sin duplicar;
+  - `holdLock` pasa a `test/support/locks.ts` y `ProviderAdmin.requests()`
+    admite no filtrar por teléfono;
+  - tests añadidos al brief: texto en Canarias y en una cita virtual,
+    `too_late` en el primer intento, segunda pasada sin reenvío, `sendSeq` y
+    `sentTo`, el job con la cita bloqueada por un `PATCH` (sin deadlock), un
+    `PATCH` mientras el job espera al proveedor, error de red, timeout y
+    cierre con una pasada en curso.
+
+  La revisión final de la rama no encontró nada crítico. Se arregló en la
+  misma rama: faltaba un test que fallara si el job bloqueaba la cita (con
+  `lockById` daba `40P01`) y otro para `sendSeq` y `sentTo`, y un 201 o 204
+  dejaba `failed` un mensaje entregado. Queda para otro cambio o para la
+  nota de producción:
+  - un error inesperado en un recordatorio corta la pasada y, como ese
+    recordatorio va primero, las siguientes también;
+  - 408 y 429 quedan `failed` por la regla «cualquier 4xx»; un
+    `PROVIDER_URL` con `/` final llama a `//messages`;
+  - `excludeIds` crece con cada recordatorio tratado en la pasada (`NOT IN`
+    con todos); fijar `now` al empezar la pasada lo evitaría;
+  - `skipReasonAtSendTime` repite la regla de `hasStarted`, y el
+    `reason ?? 'no_phone'` del caso de uso solo estrecha el tipo;
+  - no hay e2e del job con la base caída (503).
+
+  Cada test nuevo se vio fallar por su motivo. Los unitarios, contra un
+  esqueleto que exportaba los nombres sin comportamiento; los tres que
+  pasaban con él, con una mutación. Los de repositorio, contra métodos que
+  devolvían `null` o `0` y con 7 mutaciones (sin filtro de estado, de hora
+  o de `excludeIds`, sin bloqueo, sin `SKIP LOCKED`, otro orden). Los del
+  job fallaban todos con 404 antes de existir la ruta, y además cada uno con
+  su mutación (clave = id de la cita o distinta por intento, sin cabecera,
+  sin guardar el resultado, zona fija, zona sin `virtual`, hora prevista en
+  vez de la actual, rechazo como reintento, sin mirar teléfono, baja o
+  inicio, sin bloqueo, ignorar la señal, sin `try/catch`, sin timeout,
+  `lockById`, `sendSeq` fijo, sin abortar o en `onApplicationShutdown`). Sin
+  bloqueo en `lockNextDue`, 5 pasadas a la vez duplicaban llamadas (4 de 4
+  veces). La espera del coordinador no se ve en e2e (`server.close()` y el
+  pool de `pg` ya esperan): la prueban sus unitarios con 7 mutaciones. Que
+  el controlador registre la pasada en el coordinador no lo detecta ningún
+  test por esa misma razón.
+
+  Verificación: `npm run verify` en verde (17 archivos y 169 unitarios,
+  7 archivos y 128 e2e) y `docker compose -p clinicsay up --build -d --wait`
+  con un recorrido a mano: nada antes de su hora, 5 pasadas a la vez sobre
+  20 recordatorios (3 + 4 + 4 + 5 + 4 tratados; 21 peticiones con 20 claves
+  distintas, la de más es el reintento del 503 con la misma clave), envío
+  con el texto exacto, 503 y envío al minuto con `attempts` 2, y 422 →
+  `failed`. `scripts/smoke.sh` llega
+  con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 8 usa
+  `sendSeq` y `sentTo` para elegir la cita de una respuesta, y la 9 cuenta
+  lo pendiente en la nota de producción.

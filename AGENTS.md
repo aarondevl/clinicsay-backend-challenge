@@ -69,11 +69,13 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
 | Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
-| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, `cancelReminder`, `too_late` al crear con `newReminder`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
+| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, `cancelReminder`, `too_late` al crear con `newReminder`, descartes al enviar con `skipReasonAtSendTime` y `skipReminder`, resultado de cada intento con `recordAttempt`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
 | Pasada del job (bloqueo, orden de descartes, llamada, guardado) | `src/application/reminders/run-reminder-pass.ts` | `test/reminder-job.e2e-spec.ts` |
+| Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
+| `POST /jobs/reminders/run` y cierre ordenado (abortar y esperar a la pasada en `beforeApplicationShutdown`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
 | Webhook (deduplicación, cita destino) | `src/application/inbound/handle-inbound-message.ts` | `test/webhook.e2e-spec.ts` |
 | Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
@@ -82,6 +84,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
 | Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
 | Bloqueo de la cita y de sus pendientes (`FOR UPDATE`, sin `SKIP LOCKED`) y lecturas sin identity map | `src/infrastructure/persistence/repositories/appointment.repository.ts` (`lockById`), `reminder.repository.ts` (`lockPendingByAppointment`) | `test/reschedule-cancel.e2e-spec.ts` |
+| Siguiente recordatorio del job (`FOR UPDATE SKIP LOCKED`, por `next_attempt_at` e id) y número de envío (`reminder_send_seq`) | `reminder.repository.ts` (`lockNextDue`, `nextSendSequence`) | `test/reminder-job.e2e-spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 | Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
@@ -98,7 +101,7 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 | `src/domain` | Tipos y funciones puras | `@nestjs/*`, `@mikro-orm/*`, red, `process.env`, la hora actual |
 | `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `IdGenerator`, `Transactions`, repositorios, `MessageProvider`) como clases abstractas | `@nestjs/*`, `@mikro-orm/*`, `src/http`, `src/infrastructure` |
 | `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes, el generador de ids y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
-| `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores | `@mikro-orm/*` |
+| `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores y `ShutdownCoordinator` (cierre ordenado del job) | `@mikro-orm/*` |
 | `src/app.module.ts`, `src/app.factory.ts`, `src/main.ts`, `src/config/` | Composición: cablea todo | — |
 
 - `test/architecture.spec.ts` comprueba los imports de `src/domain` y
@@ -174,12 +177,21 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   lo que evita que el paciente reciba dos mensajes tras un 504.
 - **Descartes al enviar**, en este orden: `too_late` (la cita ya empezó),
   `no_phone`, `opted_out`. Ninguno llama al proveedor.
-- **Proveedor:** 202 o 200 (duplicado) → `sent`. Cualquier 4xx → `failed`, sin
-  reintento. 5xx, error de red o más de 5000 ms → reintento. `attempts` cuenta
-  las llamadas hechas al proveedor.
+- **Proveedor:** 202 o 200 (duplicado) → `sent`, igual que cualquier otro 2xx.
+  Cualquier 4xx → `failed`, sin reintento. 5xx, error de red, más de 5000 ms,
+  1xx o 3xx → reintento. `attempts` cuenta las llamadas hechas al proveedor.
+  `sentAt` y la hora desde la que cuenta el reintento son la del servicio
+  después de la llamada; `too_late` se mira antes. `sendSeq` (secuencia
+  `reminder_send_seq`) y `sentTo` solo se fijan al quedar `sent`.
 - **Reintentos:** `RETRY_DELAYS_MINUTES = [1, 5]`, 3 intentos como mucho. Es la
   única definición de esos valores. El reintento mueve `next_attempt_at`, no
   `scheduledFor`, y no espera a que acabe la franja de silencio.
+- **Cierre ordenado:** `ShutdownCoordinator` aborta la señal de las pasadas en
+  `beforeApplicationShutdown` y espera a las que están en curso: ninguna toma
+  otro recordatorio y la que tiene uno lo guarda antes de que se cierre la
+  base. Tiene que ser ahí y no en `onApplicationShutdown`: Nest cierra antes
+  el servidor HTTP, que espera a la petición del job, y una pasada sin
+  abortar seguiría hasta vaciar la cola.
 - **Franja de silencio:** `[21:00, 09:00)` en hora local; lo que cae dentro pasa
   a las 09:00 siguientes. Las citas con `virtual: true` usan `Europe/Madrid`
   para la hora, la franja y el texto. `virtual` es una extensión opcional del
@@ -201,10 +213,14 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
 - El proveedor no se mockea. Los fallos se provocan con su API de
   administración (`POST /admin/rules` con `unavailable`, `lost-response` o
   `reject`) y se comprueban con `GET /admin/requests`. Las dos excepciones:
-  el timeout se prueba con un `providerTimeoutMs` bajo en `startTestApp`, y el
-  error de red con un `providerUrl` a un puerto cerrado. La caída de la base
-  se prueba poniendo entre la app y Postgres un proxy TCP
-  (`test/support/tcp-proxy.ts`) y cortándolo.
+  el timeout se prueba con un `providerTimeoutMs` bajo en `startTestApp` y el
+  proxy TCP (`test/support/tcp-proxy.ts`) con `dropResponses(true)`, que deja
+  llegar la petición y descarta la respuesta, y el error de red con un
+  `providerUrl` a un puerto cerrado. La caída de la base se prueba poniendo
+  ese mismo proxy entre la app y Postgres y cortándolo.
+- Un bloqueo que otra transacción retiene se prueba con `holdLock`
+  (`test/support/locks.ts`): abre la transacción, toma el bloqueo y no
+  confirma hasta `release()`.
 - Cada test crea sus propios datos y fija la hora con `setClock`. Las reglas del
   proveedor y los recordatorios pendientes son globales, así que cada e2e
   empieza con `t.reset()` (vacía las tablas y el proveedor). Los e2e corren en

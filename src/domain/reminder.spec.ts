@@ -1,4 +1,11 @@
-import { cancelReminder, newReminder, type Reminder } from './reminder.js';
+import {
+  cancelReminder,
+  newReminder,
+  recordAttempt,
+  type Reminder,
+  skipReasonAtSendTime,
+  skipReminder,
+} from './reminder.js';
 
 const ID = '019a0000-0000-7000-8000-000000000001';
 const APPOINTMENT_ID = '019a0000-0000-7000-8000-000000000002';
@@ -93,5 +100,213 @@ describe('cancelReminder', () => {
     { ...pending(), status: 'cancelled', nextAttemptAt: null },
   ])('uno $status se queda como está', (reminder) => {
     expect(cancelReminder(reminder)).toEqual(reminder);
+  });
+});
+
+describe('skipReasonAtSendTime', () => {
+  const now = new Date('2027-03-27T09:00:00Z');
+  const ready = {
+    startsAt: new Date('2027-03-28T08:00:00Z'),
+    now,
+    phone: '+34600111222',
+    acceptsReminders: true,
+  };
+
+  it('con la cita por empezar, teléfono y sin baja no hay motivo para descartarlo', () => {
+    expect(skipReasonAtSendTime(ready)).toBeNull();
+  });
+
+  it('una cita que ya empezó es too_late', () => {
+    expect(
+      skipReasonAtSendTime({
+        ...ready,
+        startsAt: new Date('2027-03-27T08:59:59Z'),
+      }),
+    ).toBe('too_late');
+  });
+
+  it('una cita que empieza justo ahora es too_late', () => {
+    expect(skipReasonAtSendTime({ ...ready, startsAt: now })).toBe('too_late');
+  });
+
+  it('una cita que empieza un milisegundo después todavía se envía', () => {
+    expect(
+      skipReasonAtSendTime({
+        ...ready,
+        startsAt: new Date('2027-03-27T09:00:00.001Z'),
+      }),
+    ).toBeNull();
+  });
+
+  it('sin teléfono es no_phone', () => {
+    expect(skipReasonAtSendTime({ ...ready, phone: null })).toBe('no_phone');
+  });
+
+  it('dado de baja es opted_out', () => {
+    expect(skipReasonAtSendTime({ ...ready, acceptsReminders: false })).toBe(
+      'opted_out',
+    );
+  });
+
+  it('too_late va antes que no_phone y que opted_out', () => {
+    expect(
+      skipReasonAtSendTime({
+        startsAt: now,
+        now,
+        phone: null,
+        acceptsReminders: false,
+      }),
+    ).toBe('too_late');
+  });
+
+  it('no_phone va antes que opted_out', () => {
+    expect(
+      skipReasonAtSendTime({ ...ready, phone: null, acceptsReminders: false }),
+    ).toBe('no_phone');
+  });
+});
+
+describe('envío de un recordatorio', () => {
+  const T = new Date('2027-03-27T09:00:00Z');
+  /** Pendiente nuevo en cada llamada, para que un test no contamine a otro. */
+  const pending = (over: Partial<Reminder> = {}): Reminder => ({
+    id: ID,
+    appointmentId: APPOINTMENT_ID,
+    scheduledFor: T,
+    status: 'pending',
+    skipReason: null,
+    attempts: 0,
+    nextAttemptAt: T,
+    sentAt: null,
+    sentTo: null,
+    sendSeq: null,
+    ...over,
+  });
+  const to = '+34600111222';
+
+  describe('skipReminder', () => {
+    it('lo deja skipped con el motivo, sin próximo intento y con sus intentos', () => {
+      const retried = pending({
+        attempts: 1,
+        nextAttemptAt: new Date('2027-03-27T09:01:00Z'),
+      });
+      expect(skipReminder(retried, 'too_late')).toEqual({
+        ...retried,
+        status: 'skipped',
+        skipReason: 'too_late',
+        nextAttemptAt: null,
+      });
+    });
+
+    it('no modifica el recordatorio recibido', () => {
+      const original = pending();
+      skipReminder(original, 'no_phone');
+      expect(original).toEqual(pending());
+    });
+
+    it('uno que no está pendiente es un fallo de programación', () => {
+      expect(() =>
+        skipReminder(pending({ status: 'sent' }), 'opted_out'),
+      ).toThrow(Error);
+    });
+  });
+
+  describe('recordAttempt', () => {
+    it('entregado: sent con sentAt, sentTo y sendSeq, y sin próximo intento', () => {
+      expect(
+        recordAttempt(pending(), 'delivered', { now: T, to, sendSeq: 7 }),
+      ).toEqual({
+        ...pending(),
+        status: 'sent',
+        attempts: 1,
+        nextAttemptAt: null,
+        sentAt: T,
+        sentTo: to,
+        sendSeq: 7,
+      });
+    });
+
+    it('entregado en un reintento suma ese intento', () => {
+      const retried = pending({
+        attempts: 2,
+        nextAttemptAt: new Date('2027-03-27T09:06:00Z'),
+      });
+      const at = new Date('2027-03-27T09:06:00Z');
+      expect(
+        recordAttempt(retried, 'delivered', { now: at, to, sendSeq: 1 }),
+      ).toMatchObject({ status: 'sent', attempts: 3, sentAt: at });
+    });
+
+    it('rechazado: failed sin próximo intento', () => {
+      expect(
+        recordAttempt(pending(), 'rejected', { now: T, to, sendSeq: null }),
+      ).toEqual({
+        ...pending(),
+        status: 'failed',
+        attempts: 1,
+        nextAttemptAt: null,
+      });
+    });
+
+    it('primer fallo que se reintenta: pending para 1 minuto después', () => {
+      expect(
+        recordAttempt(pending(), 'retry', { now: T, to, sendSeq: null }),
+      ).toEqual({
+        ...pending(),
+        attempts: 1,
+        nextAttemptAt: new Date('2027-03-27T09:01:00Z'),
+      });
+    });
+
+    it('segundo fallo: pending para 5 minutos después; scheduledFor no se mueve', () => {
+      const at = new Date('2027-03-27T09:01:00Z');
+      const retried = pending({ attempts: 1, nextAttemptAt: at });
+      expect(
+        recordAttempt(retried, 'retry', { now: at, to, sendSeq: null }),
+      ).toEqual({
+        ...retried,
+        scheduledFor: T,
+        attempts: 2,
+        nextAttemptAt: new Date('2027-03-27T09:06:00Z'),
+      });
+    });
+
+    it('tercer fallo: failed con 3 intentos', () => {
+      const at = new Date('2027-03-27T09:06:00Z');
+      expect(
+        recordAttempt(pending({ attempts: 2, nextAttemptAt: at }), 'retry', {
+          now: at,
+          to,
+          sendSeq: null,
+        }),
+      ).toEqual({
+        ...pending(),
+        status: 'failed',
+        attempts: 3,
+        nextAttemptAt: null,
+      });
+    });
+
+    it('no modifica el recordatorio recibido', () => {
+      const original = pending();
+      recordAttempt(original, 'delivered', { now: T, to, sendSeq: 1 });
+      expect(original).toEqual(pending());
+    });
+
+    it('uno que no está pendiente es un fallo de programación', () => {
+      expect(() =>
+        recordAttempt(pending({ status: 'cancelled' }), 'delivered', {
+          now: T,
+          to,
+          sendSeq: 1,
+        }),
+      ).toThrow(Error);
+    });
+
+    it('entregado sin número de envío es un fallo de programación', () => {
+      expect(() =>
+        recordAttempt(pending(), 'delivered', { now: T, to, sendSeq: null }),
+      ).toThrow(Error);
+    });
   });
 });

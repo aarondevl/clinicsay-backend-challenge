@@ -67,6 +67,29 @@ export abstract class ReminderRepository {
    */
   abstract lockPendingByAppointment(appointmentId: string): Promise<Reminder[]>;
 
+  /**
+   * Toma el siguiente recordatorio que le toca al job: `pending`, con
+   * `nextAttemptAt <= now` y que no esté en `excludeIds`, el más antiguo por
+   * `nextAttemptAt` y después por id. Lo bloquea (`FOR UPDATE SKIP LOCKED`)
+   * hasta el final de la transacción y se salta, sin esperar, los que tenga
+   * bloqueados otra; así varias pasadas a la vez nunca toman el mismo.
+   * Devuelve `null` si no queda ninguno.
+   *
+   * @param now Hora del servicio (puerto `Clock`).
+   * @param excludeIds Recordatorios que esta pasada ya trató.
+   */
+  abstract lockNextDue(
+    now: Date,
+    excludeIds: string[],
+  ): Promise<Reminder | null>;
+
+  /**
+   * Devuelve el siguiente número de envío (secuencia `reminder_send_seq`).
+   * Crece con cada llamada y ordena los envíos aunque `sentAt` empate con el
+   * reloj congelado; solo se pide al quedar `sent`.
+   */
+  abstract nextSendSequence(): Promise<number>;
+
   /** Guarda un recordatorio nuevo. */
   abstract insert(reminder: Reminder): Promise<void>;
 

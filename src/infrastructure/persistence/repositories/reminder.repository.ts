@@ -37,6 +37,39 @@ export class MikroOrmReminderRepository extends ReminderRepository {
     return rows.map(toReminder);
   }
 
+  /**
+   * Siguiente pendiente que toca con `SELECT ... FOR UPDATE SKIP LOCKED`
+   * (índice `reminder_due`); se salta las filas que otra transacción tiene
+   * bloqueadas en vez de esperarlas.
+   */
+  async lockNextDue(now: Date, excludeIds: string[]): Promise<Reminder | null> {
+    const row = await this.tx.findOne(
+      ReminderEntity,
+      {
+        status: 'pending',
+        nextAttemptAt: { $lte: now },
+        // Sin ids que excluir no se añade la condición: `not in ()` no es SQL válido.
+        ...(excludeIds.length > 0 ? { id: { $nin: excludeIds } } : {}),
+      },
+      {
+        ...READ,
+        orderBy: { nextAttemptAt: 'asc', id: 'asc' },
+        lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE,
+      },
+    );
+    return row ? toReminder(row) : null;
+  }
+
+  /** `nextval('reminder_send_seq')`; Postgres devuelve el `bigint` como texto. */
+  async nextSendSequence(): Promise<number> {
+    const row = await this.tx.execute<{ seq: string }>(
+      `select nextval('reminder_send_seq') as seq`,
+      [],
+      'get',
+    );
+    return Number(row.seq);
+  }
+
   /** Inserta el recordatorio (sin pasar por el identity map). */
   async insert(reminder: Reminder): Promise<void> {
     await this.tx.insert(ReminderEntity, {
