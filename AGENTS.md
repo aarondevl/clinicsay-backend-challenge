@@ -155,9 +155,14 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   `scheduled`. Cancelar una cita cancela su pendiente; si ya estaba
   cancelada, responde 200 sin escribir.
 - **Orden de bloqueo:** primero la cita (`lockById`) y después sus
-  pendientes (`lockPendingByAppointment`), nunca al revés. Así dos `PATCH` a
-  la vez se ponen en fila y el segundo ve el pendiente que creó el primero, y
-  quien espera al job ve el estado final del recordatorio.
+  pendientes (`lockPendingByAppointment`). Así dos `PATCH`, o un `PATCH` y un
+  cancelar, se ponen en fila y el segundo ve el pendiente que creó el
+  primero, y quien espera al job ve el estado final del recordatorio. Quien
+  tiene bloqueado un recordatorio nunca espera el bloqueo de su cita: el job,
+  que toma el recordatorio con `SKIP LOCKED`, lee la cita sin bloquearla (o
+  la bloquea con `NOWAIT` o `SKIP LOCKED`). Esperar la cita con un
+  recordatorio bloqueado cierra un ciclo con un `PATCH`, y Postgres aborta
+  uno con `40P01` (un 500).
 - **Orden:** los recordatorios de una cita se listan por id (UUIDv7 del puerto
   `IdGenerator`), no por fecha, porque con el reloj congelado las fechas
   empatan. Los ids no salen de `src/domain`: un UUIDv7 lee la hora del sistema.

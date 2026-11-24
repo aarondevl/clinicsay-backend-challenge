@@ -275,8 +275,14 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     sus pendientes (`FOR UPDATE` sin `SKIP LOCKED`). Dos `PATCH` a la vez se
     ponen en fila en la cita y el segundo cancela el pendiente que creó el
     primero; sin ese bloqueo, el segundo insertaba otro pendiente y el
-    índice `reminder_one_pending` lo rechazaba con un 500. Las tareas 7 y 8
-    siguen el mismo orden;
+    índice `reminder_one_pending` lo rechazaba con un 500 (reproducido).
+    Cancelar sin bloquear la cita, con un `PATCH` esperando al job, perdía la
+    hora nueva y dejaba un pendiente en la cita cancelada (reproducido). El
+    webhook (tarea 8) sigue el mismo orden. El job (tarea 7) toma primero el
+    recordatorio con `SKIP LOCKED`, así que no puede esperar después el
+    bloqueo de la cita: la lee sin bloquearla, o la bloquea con `NOWAIT` o
+    `SKIP LOCKED`, porque si no cerraría un ciclo con un `PATCH` y Postgres
+    abortaría uno con `40P01`;
   - `PATCH` comprueba `isId` antes de abrir la transacción, como
     `GetAppointment`, y después cancelada o empezada (409) antes que
     `startsAt` no futura (400): una cita que no se puede reprogramar da 409
