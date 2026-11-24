@@ -52,6 +52,8 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
   `test` y `test:e2e`.
 - Los e2e usan la base `clinicsay_test` (`TEST_DATABASE_URL`) y lanzan su propio
   proveedor en el puerto 4011, así que no interfieren con un compose levantado.
+  El `globalSetup` (`test/support/global-setup.ts`) crea esa base si no existe
+  y se niega a arrancar si el 4011 ya tiene un proveedor.
 - Un cambio está terminado cuando `npm run verify` pasa y se ha visto la
   salida.
 
@@ -71,7 +73,8 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
 | Formato de errores y validación | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
-| Esquema e índices | `src/infrastructure/persistence/migrations/` | e2e |
+| Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
+| `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
 
@@ -173,7 +176,9 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   administración (`POST /admin/rules` con `unavailable`, `lost-response` o
   `reject`) y se comprueban con `GET /admin/requests`. Las dos excepciones:
   el timeout se prueba con un `providerTimeoutMs` bajo en `startTestApp`, y el
-  error de red con un `providerUrl` a un puerto cerrado.
+  error de red con un `providerUrl` a un puerto cerrado. La caída de la base
+  se prueba poniendo entre la app y Postgres un proxy TCP
+  (`test/support/tcp-proxy.ts`) y cortándolo.
 - Cada test crea sus propios datos y fija la hora con `setClock`. Las reglas del
   proveedor y los recordatorios pendientes son globales, así que cada e2e
   empieza con `t.reset()` (vacía las tablas y el proveedor). Los e2e corren en
@@ -210,8 +215,9 @@ Se aplican a todo código nuevo y a los archivos que un cambio toca.
   nada hace `new` de un repositorio, un cliente HTTP o un reloj.
 - **Errores propios, traducidos a HTTP en un solo sitio.** `domain` y
   `application` lanzan errores tipados de `src/application/errors.ts`
-  (`ValidationError`, `NotFoundError`, `ConflictError`); si hace falta otro,
-  se añade ahí y se traduce en `ErrorFilter`. Solo `src/http` conoce los
+  (`ValidationError`, `NotFoundError`, `ConflictError`, y
+  `ServiceUnavailableError` → 503 para una dependencia caída); si hace falta
+  otro, se añade ahí y se traduce en `ErrorFilter`. Solo `src/http` conoce los
   códigos HTTP: los casos de uso no lanzan `HttpException` ni importan
   `@nestjs/*`, para que se prueben sin Nest.
 - **`try/catch` en los límites con E/S** (proveedor, base de datos,

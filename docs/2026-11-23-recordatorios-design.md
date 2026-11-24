@@ -1102,3 +1102,29 @@ Rama `docs/entrega`.
   reglas de código (sección 2 y «Reglas de código» de `AGENTS.md`, con
   resumen en `README.md` y `CLAUDE.md`); solo documentación. Siguiente paso:
   ola 1, tareas 2 y 4 en paralelo.
+- 2026-11-24: tarea 2 implementada en `feat/persistencia`. Entran MikroORM 7
+  (`@mikro-orm/core`, `postgresql`, `migrations` y `nestjs`), las entidades con
+  `defineEntity`, la migración inicial con el SQL del plan, las migraciones en
+  `createApp` antes de abrir el puerto, `GET /health` (200, o 503 si la base no
+  responde), el `Dockerfile`, los servicios `db` y `api` del compose, el
+  `globalSetup` de los e2e (base `clinicsay_test` y proveedor en el 4011),
+  `TestApp` con `orm`, `provider` y `reset()`, y en el CI Postgres para
+  `checks` y el job `compose`. Cambios respecto al plan:
+  - el 503 de `/health` sale de un error propio nuevo, `ServiceUnavailableError`,
+    que traduce `ErrorFilter`, para que el controlador no elija códigos HTTP;
+  - `MikroOrmModule` va con `registerRequestContext: false`: sin contexto por
+    petición, usar el `EntityManager` global falla y obliga a pasar por
+    `Transactions`;
+  - la base de test se crea con `orm.schema.ensureDatabase()` de MikroORM en
+    vez de abrir a mano una conexión a `postgres`: mismo efecto, sin importar
+    `pg` directamente;
+  - `ProviderAdmin` añade `reset()`, y `TestApp.provider` apunta siempre al
+    proveedor de test aunque se cambie `providerUrl`, para que `reset()` sirva
+    también en los tests con un puerto cerrado;
+  - tests añadidos: 503 al cortar un proxy TCP entre la app y Postgres, y en
+    `test/persistence.e2e-spec.ts` el índice `reminder_one_pending`, el
+    `check` del estado y `reset()`;
+  - la migración solo tiene `up()`.
+
+  Siguiente paso: después del merge, `compose` como check obligatorio de
+  `main`; luego la tarea 3.
