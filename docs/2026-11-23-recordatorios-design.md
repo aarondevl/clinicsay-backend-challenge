@@ -294,6 +294,33 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     (`disableIdentityMap`). Escriben con sentencias directas, y con identity
     map una lectura posterior en la misma transacción devolvía la fila vieja
     (`findOne` ni consulta y `find` no pisa un valor con `null`).
+- **Job de envío (2026-11-24):**
+  - la pasada toma cada recordatorio con `lockNextDue` (`FOR UPDATE SKIP
+    LOCKED`, por `next_attempt_at` e id) y lee cita, paciente y clínica sin
+    bloquearlas (ver «Reprogramar y cancelar»). Una transacción por
+    recordatorio, con la llamada al proveedor dentro y el resultado guardado
+    antes del `COMMIT`; `sendSeq` se pide a `reminder_send_seq` solo al quedar
+    `sent`;
+  - `too_late` se mira con la hora del servicio antes de llamar; `sentAt` y
+    la hora desde la que cuenta el reintento son la del servicio después de
+    la llamada, porque `sentAt` es «cuando el proveedor lo aceptó» y el
+    reintento va «1 minuto después del fallo». Con el reloj de test es la
+    misma hora;
+  - 200 y 202 son `sent`, cualquier 4xx es `failed` y todo lo demás (5xx,
+    error de red, timeout y los códigos que el enunciado no contempla) se
+    reintenta: con la misma `Idempotency-Key` es seguro, y un 2xx raro acaba
+    en 200 `duplicate`. El timeout (`AbortSignal.timeout`) cubre también la
+    lectura del cuerpo;
+  - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
+    fallidos y descartados;
+  - un error dentro de la transacción de un recordatorio corta la pasada
+    (500, o 503 con la base caída). Lo que no llegó a confirmarse sigue
+    pendiente con sus intentos anteriores y la siguiente pasada lo repite con
+    la misma clave, sin duplicar el mensaje;
+  - el cierre ordenado aborta la señal y espera en
+    `beforeApplicationShutdown`. Node ya espera a las peticiones HTTP en
+    curso al cerrar el servidor y el pool de `pg` a que la transacción suelte
+    su conexión, pero el coordinador no depende de esos detalles.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
