@@ -277,6 +277,11 @@ describe('reprogramar y cancelar', () => {
     );
   }
 
+  /** Cuerpo de una respuesta de cita (200 o 201). */
+  const appointmentBody = (res: { body: unknown }): AppointmentBody =>
+    // Límite con supertest: el cuerpo llega sin tipo y el test ya comprobó el estado.
+    res.body as AppointmentBody;
+
   const patch = (id: string, body: object) =>
     t.http.patch(`/appointments/${id}`).send(body);
   const cancel = (id: string) => t.http.post(`/appointments/${id}/cancel`);
@@ -323,7 +328,7 @@ describe('reprogramar y cancelar', () => {
       const res = await patch(created.id, {
         startsAt: '2027-03-30T08:00:00Z',
       }).expect(200);
-      const reminders = (res.body as AppointmentBody).reminders;
+      const reminders = appointmentBody(res).reminders;
       expect(reminders.map((r) => [r.status, r.scheduledFor])).toEqual([
         ['cancelled', '2027-03-27T09:00:00Z'],
         ['cancelled', '2027-03-28T08:00:00Z'],
@@ -347,7 +352,7 @@ describe('reprogramar y cancelar', () => {
       const res = await patch(created.id, { startsAt: '2027-03-11T07:30:00Z' });
       expect(res.status).toBe(200);
       expect(
-        (res.body as AppointmentBody).reminders.map((r) => [
+        appointmentBody(res).reminders.map((r) => [
           r.status,
           r.skipReason,
           r.scheduledFor,
@@ -372,7 +377,7 @@ describe('reprogramar y cancelar', () => {
       const res = await patch(created.id, { startsAt: '2027-03-11T08:30:00Z' });
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ virtual: true });
-      expect((res.body as AppointmentBody).reminders[1]).toMatchObject({
+      expect(appointmentBody(res).reminders[1]).toMatchObject({
         status: 'pending',
         scheduledFor: '2027-03-10T08:30:00Z',
       });
@@ -388,9 +393,7 @@ describe('reprogramar y cancelar', () => {
       );
       expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
       const got = await t.http.get(`/appointments/${created.id}`);
-      const statuses = (got.body as AppointmentBody).reminders.map(
-        (r) => r.status,
-      );
+      const statuses = appointmentBody(got).reminders.map((r) => r.status);
       expect(statuses).toEqual([
         'cancelled',
         'cancelled',
@@ -473,6 +476,35 @@ describe('reprogramar y cancelar', () => {
   });
 
   describe('POST /appointments/{id}/cancel', () => {
+    it('cancelar mientras un PATCH espera al job no pierde la hora nueva ni deja un pendiente', async () => {
+      const created = await madridAppointment();
+      // Hace de job: retiene el pendiente como si lo estuviera enviando.
+      const job = await holdLock((repos) =>
+        repos.reminders.lockPendingByAppointment(created.id),
+      );
+      // El PATCH bloquea la cita y espera al pendiente; el cancelar llega después.
+      const patching = patch(created.id, {
+        startsAt: '2027-03-29T08:00:00Z',
+      }).then((res) => res);
+      await sleep(UNBLOCKED_MS);
+      const cancelling = cancel(created.id).then((res) => res);
+      await sleep(UNBLOCKED_MS);
+      job.release();
+
+      const [patched, cancelled] = await Promise.all([patching, cancelling]);
+      await job.done;
+      expect([patched.status, cancelled.status]).toEqual([200, 200]);
+      const got = appointmentBody(
+        await t.http.get(`/appointments/${created.id}`),
+      );
+      expect(got.status).toBe('cancelled');
+      expect(got.startsAt).toBe('2027-03-29T08:00:00Z');
+      expect(got.reminders.map((r) => r.status)).toEqual([
+        'cancelled',
+        'cancelled',
+      ]);
+    });
+
     it('cancela la cita y su pendiente y responde 200 con la cita', async () => {
       const created = await madridAppointment();
       const res = await cancel(created.id);
