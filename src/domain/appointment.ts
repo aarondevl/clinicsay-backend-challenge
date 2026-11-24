@@ -14,3 +14,35 @@ export type Appointment = {
   status: AppointmentStatus;
   virtual: boolean;
 };
+
+/**
+ * Indica si la cita ya empezó: su inicio es igual o anterior a `now`. Una cita
+ * que empezó no se reprograma y su recordatorio queda `too_late`.
+ *
+ * @param now Hora del servicio (puerto `Clock`).
+ */
+export function hasStarted(appointment: Appointment, now: Date): boolean {
+  return appointment.startsAt <= now;
+}
+
+/**
+ * Mueve la cita a `startsAt`. Una cita `confirmed` vuelve a `scheduled`: la
+ * confirmación era para la hora anterior. El caso de uso comprueba antes que
+ * no esté cancelada ni haya empezado.
+ */
+export function rescheduleAppointment(
+  appointment: Appointment,
+  startsAt: Date,
+): Appointment {
+  return { ...appointment, startsAt, status: 'scheduled' };
+}
+
+/** Deja la cita `cancelled`, venga del estado que venga. */
+export function cancelAppointment(appointment: Appointment): Appointment {
+  return { ...appointment, status: 'cancelled' };
+}
+
+/** Deja la cita `confirmed` (el paciente respondió SI). */
+export function confirmAppointment(appointment: Appointment): Appointment {
+  return { ...appointment, status: 'confirmed' };
+}

@@ -69,7 +69,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
 | Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
-| Transiciones de cita y recordatorio (reprogramar, cancelar, `too_late` al crear con `newReminder`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `reminder.spec.ts` |
+| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, `cancelReminder`, `too_late` al crear con `newReminder`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
@@ -81,6 +81,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
 | Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
 | Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
+| Bloqueo de la cita y de sus pendientes (`FOR UPDATE`, sin `SKIP LOCKED`) y lecturas sin identity map | `src/infrastructure/persistence/repositories/appointment.repository.ts` (`lockById`), `reminder.repository.ts` (`lockPendingByAppointment`) | `test/reschedule-cancel.e2e-spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 | Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
@@ -151,7 +152,17 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
 - **Un pendiente por cita:** el índice único parcial `reminder_one_pending` lo
   garantiza. Reprogramar pasa el pendiente a `cancelled` y crea otro; un
   recordatorio ya `sent` se queda `sent`; una cita `confirmed` vuelve a
-  `scheduled`.
+  `scheduled`. Cancelar una cita cancela su pendiente; si ya estaba
+  cancelada, responde 200 sin escribir.
+- **Orden de bloqueo:** primero la cita (`lockById`) y después sus
+  pendientes (`lockPendingByAppointment`). Así dos `PATCH`, o un `PATCH` y un
+  cancelar, se ponen en fila y el segundo ve el pendiente que creó el
+  primero, y quien espera al job ve el estado final del recordatorio. Quien
+  tiene bloqueado un recordatorio nunca espera el bloqueo de su cita: el job,
+  que toma el recordatorio con `SKIP LOCKED`, lee la cita sin bloquearla (o
+  la bloquea con `NOWAIT` o `SKIP LOCKED`). Esperar la cita con un
+  recordatorio bloqueado cierra un ciclo con un `PATCH`, y Postgres aborta
+  uno con `40P01` (un 500).
 - **Orden:** los recordatorios de una cita se listan por id (UUIDv7 del puerto
   `IdGenerator`), no por fecha, porque con el reloj congelado las fechas
   empatan. Los ids no salen de `src/domain`: un UUIDv7 lee la hora del sistema.
@@ -213,6 +224,11 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   validación fallan sin avisar.
 - El `ValidationPipe` global usa `whitelist` y `transform`, sin conversión
   implícita: `"true"` no es un booleano.
+- MikroORM: con identity map, `findOne` devuelve la entidad ya cargada sin
+  consultar y `find` no pisa un valor con `null`. Como los repositorios
+  escriben con `insert` y `nativeUpdate`, una lectura posterior en la misma
+  transacción vería la fila vieja; por eso los repositorios de citas y
+  recordatorios leen con `disableIdentityMap: true`.
 - La plantilla de Nest sugiere `@nestjs/idempotency`, `@nestjs/resilience`,
   Nest Observe y trae skills genéricas en `.claude/skills/`. Aquí no se usan: la idempotencia y los reintentos son
   reglas del enunciado y viven en el dominio y en Postgres, donde se pueden

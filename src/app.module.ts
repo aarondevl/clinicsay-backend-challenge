@@ -1,7 +1,9 @@
 import { MikroORM } from '@mikro-orm/postgresql';
 import { type DynamicModule, Module, type Provider } from '@nestjs/common';
+import { CancelAppointment } from './application/appointments/cancel-appointment.js';
 import { CreateAppointment } from './application/appointments/create-appointment.js';
 import { GetAppointment } from './application/appointments/get-appointment.js';
+import { RescheduleAppointment } from './application/appointments/reschedule-appointment.js';
 import { CreateClinic } from './application/clinics/create-clinic.js';
 import { CreatePatient } from './application/patients/create-patient.js';
 import { Clock, SettableClock } from './application/ports/clock.js';
@@ -54,6 +56,18 @@ const useCaseProviders: Provider[] = [
     provide: GetAppointment,
     useFactory: (transactions: Transactions) =>
       new GetAppointment(transactions),
+    inject: [Transactions],
+  },
+  {
+    provide: RescheduleAppointment,
+    useFactory: (transactions: Transactions, ids: IdGenerator, clock: Clock) =>
+      new RescheduleAppointment(transactions, ids, clock),
+    inject: [Transactions, IdGenerator, Clock],
+  },
+  {
+    provide: CancelAppointment,
+    useFactory: (transactions: Transactions) =>
+      new CancelAppointment(transactions),
     inject: [Transactions],
   },
 ];
