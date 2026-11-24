@@ -81,6 +81,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
+| Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
 
@@ -219,13 +220,17 @@ Se aplican a todo código nuevo y a los archivos que un cambio toca.
   puertos por constructor y dependen de las clases abstractas de
   `src/application/ports/`, nunca de una implementación; las implementaciones
   se eligen solo en `app.module.ts`. Fuera de la composición y de los tests,
-  nada hace `new` de un repositorio, un cliente HTTP o un reloj.
+  nada hace `new` de un repositorio, un cliente HTTP o un reloj. La única
+  excepción es `MikroOrmTransactions`, la fábrica de repositorios: los crea
+  en cada `run` porque cada uno va ligado al EntityManager de su transacción.
 - **Errores propios, traducidos a HTTP en un solo sitio.** Los casos de uso
   de `application` lanzan errores tipados de `src/application/errors.ts`
   (`ValidationError`, `NotFoundError`, `ConflictError`); si hace falta otro,
   se añade ahí y se traduce en `ErrorFilter`. `ServiceUnavailableError` (503)
-  es el de una dependencia caída y lo lanza el adaptador de `/health` cuando
-  la base no responde. Solo `src/http` conoce los
+  es el de una dependencia caída: lo lanzan el adaptador de `/health` y
+  `MikroOrmTransactions` cuando la base no responde. En una transacción solo
+  cuentan los errores de conexión que reconoce `isDatabaseUnavailable`; el
+  resto (una clave foránea rota, un bug) sigue siendo 500. Solo `src/http` conoce los
   códigos HTTP: los casos de uso no lanzan `HttpException` ni importan
   `@nestjs/*`, para que se prueben sin Nest.
 - **`domain` no importa `application`** (lo comprueba

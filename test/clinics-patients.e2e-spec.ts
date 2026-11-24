@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Transactions } from '../src/application/ports/transactions.js';
-import { startTestApp, type TestApp } from './support/app.js';
+import { startTestApp, testConfig, type TestApp } from './support/app.js';
 import { createClinic, createPatient } from './support/fixtures.js';
+import { startTcpProxy } from './support/tcp-proxy.js';
 
 const UUID_V7 =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -180,5 +181,28 @@ describe('clínicas y pacientes', () => {
       expect(res.status).toBe(400);
       expect(Object.keys(res.body)).toEqual(['error']);
     });
+  });
+});
+
+describe('clínicas y pacientes sin base', () => {
+  it('POST /clinics responde 503 { error } cuando la base deja de responder', async () => {
+    // Como en /health: la app llega a Postgres por un proxy que se corta.
+    const db = new URL(testConfig().databaseUrl);
+    const proxy = await startTcpProxy(db.hostname, Number(db.port || 5432));
+    db.hostname = '127.0.0.1';
+    db.port = String(proxy.port);
+    const t = await startTestApp({ databaseUrl: db.toString() });
+    try {
+      await createClinic(t);
+      await proxy.close();
+      const res = await t.http
+        .post('/clinics')
+        .send({ name: 'Clínica', timezone: 'Europe/Madrid' });
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'database unavailable' });
+    } finally {
+      await proxy.close();
+      await t.close();
+    }
   });
 });

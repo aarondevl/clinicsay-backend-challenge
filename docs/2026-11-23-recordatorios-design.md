@@ -254,6 +254,13 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   `src/domain/time-zones.ts`, usa `IANAZone.isValidZone` de Luxon y rechaza
   además los offsets fijos, que Intl acepta como zona. La comprueba
   `CreateClinic`, que lanza `ValidationError`.
+- **Base caída fuera de `/health` (2026-11-24):** `MikroOrmTransactions.run`
+  convierte en `ServiceUnavailableError` (503) los errores de conexión
+  (códigos de socket de pg-pool y SQLSTATE de conexión, apagado o sin
+  conexiones libres). Mira solo el propio error y no su `cause`, para no
+  confundir un `fetch` fallido con la base, y deja fuera `08P01`, que también
+  lo provoca un dato con NUL. Lo demás sigue siendo 500: un 503 indica al
+  cliente que reintente y solo es cierto si la base no responde.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
