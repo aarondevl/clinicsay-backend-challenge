@@ -198,6 +198,9 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 - **Fechas en las respuestas:** UTC con `Z` y sin milisegundos cuando son cero
   (`2027-03-27T09:00:00Z`, como en el contrato).
 - **Fechas de entrada sin zona** (`2027-03-28T10:00:00`): 400.
+- **Zona de la clínica:** solo nombres IANA (`Europe/Madrid`, `Atlantic/Canary`).
+  `local`, `system` y los offsets fijos (`+01:00`) dan 400: los dos primeros
+  dependen de la máquina y un offset no tiene cambio de horario.
 - **Orden de las comprobaciones:** 400 de esquema, luego 404, luego 409 y al
   final 400 de negocio (paciente de otra clínica, `startsAt` no futura).
 
@@ -241,6 +244,23 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   parcial garantiza un solo recordatorio `pending` por cita.
 - **Reloj:** puerto `Clock`. Ninguna regla usa `new Date()`, `Date.now()` ni
   `now()` de Postgres para la hora de negocio.
+- **Ids (2026-11-24):** los genera el puerto `IdGenerator`, implementado con
+  UUIDv7 del paquete `uuid` en `src/infrastructure/ids/`. No es una función de
+  `src/domain` porque un UUIDv7 lee la hora del sistema y genera azar, y el
+  dominio solo tiene funciones puras. `isId` sí vive en el dominio: acepta la
+  forma canónica 8-4-4-4-12 en hexadecimal, que Postgres siempre puede
+  convertir a `uuid`, así que un id raro da 404 y nunca 500.
+- **Zonas válidas (2026-11-24):** `isValidTimeZone`, en
+  `src/domain/time-zones.ts`, usa `IANAZone.isValidZone` de Luxon y rechaza
+  además los offsets fijos, que Intl acepta como zona. La comprueba
+  `CreateClinic`, que lanza `ValidationError`.
+- **Base caída fuera de `/health` (2026-11-24):** `MikroOrmTransactions.run`
+  convierte en `ServiceUnavailableError` (503) los errores de conexión
+  (códigos de socket de pg-pool y SQLSTATE de conexión, apagado o sin
+  conexiones libres). Mira solo el propio error y no su `cause`, para no
+  confundir un `fetch` fallido con la base, y deja fuera `08P01`, que también
+  lo provoca un dato con NUL. Lo demás sigue siendo 500: un 503 indica al
+  cliente que reintente y solo es cierto si la base no responde.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
@@ -1185,3 +1205,53 @@ Rama `docs/entrega`.
   con el 5432 del host ocupado, `/health` en 200, 503 al parar `db` y 200 al
   volver. Siguiente paso: revisar y mergear la PR y, después, `compose` como
   check obligatorio de `main`; luego la tarea 3.
+- 2026-11-24: tarea 3 implementada en `feat/clinicas-pacientes`. Entran
+  `POST /clinics` y `POST /patients` con sus casos de uso (`CreateClinic`,
+  `CreatePatient`), los tipos `Clinic` y `Patient`, `isId`, `E164` e
+  `isValidTimeZone`, los puertos `Transactions`, `ClinicRepository`,
+  `PatientRepository` e `IdGenerator`, `MikroOrmTransactions` con sus dos
+  repositorios, el generador UUIDv7 (dependencia nueva `uuid@14`), los
+  controladores, DTOs y presentadores, `test/support/fixtures.ts` y
+  `test/clinics-patients.e2e-spec.ts`. `test/architecture.spec.ts` prohíbe
+  ahora también `@nestjs` en `src/application`. Cambios respecto al plan:
+  - `isValidTimeZone` va en `time-zones.ts`, como dice el mapa de
+    `AGENTS.md`, y no en `clinic.ts`; `errors.ts` ya existía;
+  - `newId()` no está en `src/domain`: los ids salen del puerto
+    `IdGenerator` (sección 2), así que las tareas 5 a 8 lo inyectan en sus
+    casos de uso en lugar de importar una función;
+  - `isValidTimeZone` rechaza además los offsets fijos, y `isId` acepta
+    cualquier UUID canónico, sin mirar la versión;
+  - tests añadidos al brief: `local`, `system` y offsets, `phone` a `null`,
+    otros 400 de esquema, 400 antes que 404, ida y vuelta del repositorio de
+    pacientes y 503 con la base cortada por el proxy TCP.
+
+  La revisión final de la rama no encontró nada grave. Se arregló en la misma
+  rama:
+  - con la base caída, `POST /clinics` daba 500 y ahora da 503
+    (`isDatabaseUnavailable` en `MikroOrmTransactions.run`);
+  - `AGENTS.md` declara a `MikroOrmTransactions` como la única excepción a
+    «nada hace `new` de un repositorio».
+
+  Queda para otro cambio:
+  - un offset con el signo menos de Unicode (`−05:00`) pasa como zona válida;
+  - un carácter NUL en `name` da 500 (Postgres lo rechaza con 08P01); haría
+    falta un validador de texto compartido en `src/http/validation.ts`;
+  - el JSDoc de `IdGenerator` promete orden creciente sin aclarar que es
+    dentro de un proceso; con varias réplicas no se cumple (tarea 6 y nota
+    de producción);
+  - que `findById` de los repositorios devuelva `null` si el id no es UUID,
+    como defensa añadida del 404 cuando las tareas 5 y 6 añadan más búsquedas.
+
+  Cada test nuevo se vio fallar por su motivo, con la función ausente o con
+  una mutación temporal (aceptar o rechazar todo, la validación de zonas que
+  usa `localDateTime`, un generador UUIDv4, quitar `isId`, la búsqueda de la
+  clínica, la comprobación de zona o el `@Matches`, y convertir cualquier
+  error en 503). La excepción es «JSON mal formado → 400» en `POST /clinics`,
+  que pasa desde el principio porque el parser y el filtro globales vienen de
+  la tarea 1.
+
+  Verificación: `npm run verify` en verde (12 archivos y 81 unitarios,
+  4 archivos y 33 e2e), `npm run build` y
+  `docker compose -p clinicsay up --build -d --wait` con un recorrido a mano
+  de las dos rutas. Siguiente paso: revisar y mergear la PR; la tarea 5
+  consume `Transactions`, `IdGenerator`, `isId` y los fixtures.

@@ -65,7 +65,9 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Regla | Dónde vive | Test |
 |---|---|---|
 | Hora de envío (día anterior, zona IANA, cambio de horario) y franja `[21:00, 09:00)` | `src/domain/reminder-schedule.ts` (`planReminder`) | `reminder-schedule.spec.ts` |
-| Zona efectiva (`virtual` → `Europe/Madrid`) y zonas válidas | `src/domain/time-zones.ts` | `time-zones.spec.ts` |
+| Zona efectiva (`virtual` → `Europe/Madrid`) y zonas válidas (`isValidTimeZone`: solo IANA, sin `local`, `system` ni offsets) | `src/domain/time-zones.ts` | `time-zones.spec.ts` |
+| Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
+| Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
 | Transiciones de cita y recordatorio (reprogramar, cancelar, `too_late`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | sus `*.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
@@ -73,11 +75,13 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
 | Pasada del job (bloqueo, orden de descartes, llamada, guardado) | `src/application/reminders/run-reminder-pass.ts` | `test/reminder-job.e2e-spec.ts` |
 | Webhook (deduplicación, cita destino) | `src/application/inbound/handle-inbound-message.ts` | `test/webhook.e2e-spec.ts` |
+| Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
 | Formato de errores y validación | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
+| Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
 
@@ -89,8 +93,8 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 | Carpeta | Contiene | Nunca usa |
 |---|---|---|
 | `src/domain` | Tipos y funciones puras | `@nestjs/*`, `@mikro-orm/*`, red, `process.env`, la hora actual |
-| `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `Transactions`, repositorios, `MessageProvider`) como clases abstractas | `@mikro-orm/*`, `src/http`, `src/infrastructure` |
-| `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
+| `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `IdGenerator`, `Transactions`, repositorios, `MessageProvider`) como clases abstractas | `@nestjs/*`, `@mikro-orm/*`, `src/http`, `src/infrastructure` |
+| `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes, el generador de ids y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
 | `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores | `@mikro-orm/*` |
 | `src/app.module.ts`, `src/app.factory.ts`, `src/main.ts`, `src/config/` | Composición: cablea todo | — |
 
@@ -141,8 +145,9 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   garantiza. Reprogramar pasa el pendiente a `cancelled` y crea otro; un
   recordatorio ya `sent` se queda `sent`; una cita `confirmed` vuelve a
   `scheduled`.
-- **Orden:** los recordatorios de una cita se listan por id (UUIDv7 generado en
-  la app), no por fecha, porque con el reloj congelado las fechas empatan.
+- **Orden:** los recordatorios de una cita se listan por id (UUIDv7 del puerto
+  `IdGenerator`), no por fecha, porque con el reloj congelado las fechas
+  empatan. Los ids no salen de `src/domain`: un UUIDv7 lee la hora del sistema.
 - **Envío sin duplicados:** una transacción por recordatorio, tomado con
   `FOR UPDATE SKIP LOCKED`. Dentro se vuelven a comprobar las reglas, se llama
   al proveedor con `Idempotency-Key` = id del recordatorio y se guarda el
@@ -215,13 +220,17 @@ Se aplican a todo código nuevo y a los archivos que un cambio toca.
   puertos por constructor y dependen de las clases abstractas de
   `src/application/ports/`, nunca de una implementación; las implementaciones
   se eligen solo en `app.module.ts`. Fuera de la composición y de los tests,
-  nada hace `new` de un repositorio, un cliente HTTP o un reloj.
+  nada hace `new` de un repositorio, un cliente HTTP o un reloj. La única
+  excepción es `MikroOrmTransactions`, la fábrica de repositorios: los crea
+  en cada `run` porque cada uno va ligado al EntityManager de su transacción.
 - **Errores propios, traducidos a HTTP en un solo sitio.** Los casos de uso
   de `application` lanzan errores tipados de `src/application/errors.ts`
   (`ValidationError`, `NotFoundError`, `ConflictError`); si hace falta otro,
   se añade ahí y se traduce en `ErrorFilter`. `ServiceUnavailableError` (503)
-  es el de una dependencia caída y lo lanza el adaptador de `/health` cuando
-  la base no responde. Solo `src/http` conoce los
+  es el de una dependencia caída: lo lanzan el adaptador de `/health` y
+  `MikroOrmTransactions` cuando la base no responde. En una transacción solo
+  cuentan los errores de conexión que reconoce `isDatabaseUnavailable`; el
+  resto (una clave foránea rota, un bug) sigue siendo 500. Solo `src/http` conoce los
   códigos HTTP: los casos de uso no lanzan `HttpException` ni importan
   `@nestjs/*`, para que se prueben sin Nest.
 - **`domain` no importa `application`** (lo comprueba

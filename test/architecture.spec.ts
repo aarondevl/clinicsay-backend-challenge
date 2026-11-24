@@ -51,11 +51,11 @@ describe('arquitectura', () => {
     ).toEqual([]);
   });
 
-  it('src/application no importa @mikro-orm, infrastructure ni http', () => {
+  it('src/application no importa @nestjs, @mikro-orm, infrastructure ni http', () => {
     expect(
       forbiddenImports(
         'application',
-        ['@mikro-orm'],
+        ['@nestjs', '@mikro-orm'],
         ['infrastructure', 'http'],
       ),
     ).toEqual([]);
