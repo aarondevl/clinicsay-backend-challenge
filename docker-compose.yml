@@ -5,3 +5,18 @@ services:
     build: ./provider
     ports:
       - "4010:4010"
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: clinicsay
+      POSTGRES_PASSWORD: clinicsay
+      POSTGRES_DB: clinicsay
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinicsay -d clinicsay"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
