@@ -1873,9 +1873,10 @@ Rama `docs/entrega`.
   down -v`. Siguiente paso: revisar y mergear la PR #13 con `checks` y
   `compose` en verde antes del cierre (25-11-2026, 17:30 de Madrid). No
   queda otra tarea del plan.
-- 2026-11-24: arreglado en `fix/franja-al-enviar` el hallazgo importante de
-  la revisión final de `main`: la franja de silencio solo se aplicaba al
-  planificar (`planReminder`) y no al enviar.
+- 2026-11-24: arreglado en `fix/franja-al-enviar`, PR
+  [#14](https://github.com/aarondevl/clinicsay-backend-challenge/pull/14),
+  el hallazgo importante de la revisión final de `main`: la franja de
+  silencio solo se aplicaba al planificar (`planReminder`) y no al enviar.
   - escenario: una cita del 11/03/2027 a las 10:00 de Madrid creada a las
     20:59:30 del día antes tiene `scheduledFor` a esa hora; la pasada de las
     21:00 la enviaba. Igual con un cron atrasado o una cola acumulada que se
@@ -1912,4 +1913,4 @@ Rama `docs/entrega`.
   compose, el escenario a mano: `{"processed":0}` a las 21:00, sin
   peticiones al proveedor y `pending` con `attempts` 0; a las 09:00,
   `{"processed":1}`, `sent` con `sentAt` 2027-03-11T08:00:00Z y
-  `scheduledFor` sin cambiar. Siguiente paso: revisar y mergear la PR.
+  `scheduledFor` sin cambiar. Siguiente paso: revisar y mergear la PR #14.

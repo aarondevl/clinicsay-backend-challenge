@@ -408,7 +408,7 @@ el estado del documento de diseño):
 - La franja de silencio solo se aplicaba al planificar: un primer intento que
   el job tomaba entre las 21:00 y las 09:00 salía en ese momento, aunque el
   enunciado solo deja pasar a los reintentos. Lo encontró la revisión final de
-  `main`; ahora se aplaza a las 09:00 sin llamar al proveedor.
+  `main`; ahora se aplaza a las 09:00 sin llamar al proveedor (#14).
 
 ## Reglas de código
 
