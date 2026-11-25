@@ -1991,9 +1991,11 @@ Rama `docs/entrega`.
   clinicsay up --build -d --wait` con los tres servicios sanos y
   `./scripts/smoke.sh` con `exit=0`; después `docker compose -p clinicsay
   down -v`. Siguiente paso: revisar y mergear la PR.
-- 2026-11-24: añadido en `test/contrato-openapi` un test de contrato. Hasta
-  ahora ningún test leía `openapi.yaml`: los e2e copiaban sus valores a mano,
-  y los tests de evaluación miden contra ese archivo.
+- 2026-11-24: añadido en `test/contrato-openapi`, PR
+  [#16](https://github.com/aarondevl/clinicsay-backend-challenge/pull/16), un
+  test de contrato. Hasta ahora ningún test leía `openapi.yaml`: los e2e
+  copiaban sus valores a mano, y los tests de evaluación miden contra ese
+  archivo.
   - `test/support/contract.ts` (`expectContract`, `uncoveredResponses`) carga
     `openapi.yaml` con `yaml` y valida con Ajv 2020 y `ajv-formats` en modo
     estricto (sección 2, «Test de contrato»). `test/support/contract.spec.ts`
