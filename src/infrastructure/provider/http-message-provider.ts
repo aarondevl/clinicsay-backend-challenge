@@ -14,7 +14,8 @@ export class HttpMessageProvider extends MessageProvider {
 
   /**
    * @param baseUrl URL del proveedor, sin `/` final (`PROVIDER_URL`).
-   * @param timeoutMs Tiempo máximo de espera por la respuesta completa.
+   * @param timeoutMs Tiempo máximo de espera por la respuesta, cuerpo
+   * incluido.
    */
   constructor(
     private readonly baseUrl: string,
@@ -24,14 +25,16 @@ export class HttpMessageProvider extends MessageProvider {
   }
 
   /**
-   * Envía el mensaje con su `Idempotency-Key`. Cualquier código HTTP es un
-   * `response`; si no responde en `timeoutMs` es `timeout`, y cualquier otro
-   * fallo de `fetch` (conexión rechazada, DNS, socket cortado) es
-   * `network_error`. Nunca lanza.
+   * Envía el mensaje con su `Idempotency-Key`. En cuanto llegan las cabeceras
+   * el resultado es un `response` con su código, aunque después falle la
+   * lectura del cuerpo. Si no llegan en `timeoutMs` es `timeout`, y cualquier
+   * otro fallo de `fetch` antes de las cabeceras (conexión rechazada, DNS,
+   * socket cortado) es `network_error`. Nunca lanza.
    */
   async send(message: OutgoingMessage): Promise<ProviderResult> {
+    let response: Response;
     try {
-      const response = await fetch(`${this.baseUrl}/messages`, {
+      response = await fetch(`${this.baseUrl}/messages`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -40,11 +43,6 @@ export class HttpMessageProvider extends MessageProvider {
         body: JSON.stringify({ to: message.to, text: message.text }),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-      // Solo cuenta el código, pero el cuerpo se lee para liberar la conexión.
-      // Si falla al leerlo, se trata como si no hubiera respondido: reintentar
-      // con la misma clave es seguro.
-      await response.arrayBuffer();
-      return { kind: 'response', status: response.status };
     } catch (error) {
       const result: ProviderResult = isTimeout(error)
         ? { kind: 'timeout' }
@@ -54,6 +52,29 @@ export class HttpMessageProvider extends MessageProvider {
         error,
       );
       return result;
+    }
+    await this.discardBody(response, message.idempotencyKey);
+    return { kind: 'response', status: response.status };
+  }
+
+  /**
+   * Lee y descarta el cuerpo para liberar la conexión. Solo cuenta el código,
+   * que ya llegó con las cabeceras: si la conexión se corta o salta el
+   * timeout a mitad del cuerpo, se registra y el código se mantiene. Tratarlo
+   * como si no hubiera respondido reintentaría un 4xx, que podría entregar
+   * lo que el operador rechazó, y repetiría un 2xx ya aceptado.
+   */
+  private async discardBody(
+    response: Response,
+    idempotencyKey: string,
+  ): Promise<void> {
+    try {
+      await response.arrayBuffer();
+    } catch (error) {
+      this.logger.warn(
+        `provider body of a ${response.status} not read (idempotency key ${idempotencyKey})`,
+        error,
+      );
     }
   }
 }
