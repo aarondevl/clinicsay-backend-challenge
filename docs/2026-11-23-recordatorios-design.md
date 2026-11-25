@@ -1923,8 +1923,10 @@ Rama `docs/entrega`.
   peticiones al proveedor y `pending` con `attempts` 0; a las 09:00,
   `{"processed":1}`, `sent` con `sentAt` 2027-03-11T08:00:00Z y
   `scheduledFor` sin cambiar. Siguiente paso: revisar y mergear la PR #14.
-- 2026-11-24: arreglado en `fix/4xx-sin-cuerpo` otro hallazgo importante de
-  la revisión final de `main`: un 4xx del proveedor se podía reintentar.
+- 2026-11-24: arreglado en `fix/4xx-sin-cuerpo`, PR
+  [#15](https://github.com/aarondevl/clinicsay-backend-challenge/pull/15),
+  otro hallazgo importante de la revisión final de `main`: un 4xx del
+  proveedor se podía reintentar.
   - escenario: el proveedor responde 422 (en `provider/server.mjs`,
     «rejected by the carrier (do not retry)») y corta la conexión antes de
     terminar el cuerpo, o el cuerpo no
