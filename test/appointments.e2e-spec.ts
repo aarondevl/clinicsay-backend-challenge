@@ -160,6 +160,11 @@ describe('citas', () => {
         'startsAt con un año de 5 cifras',
         { startsAt: '+010000-01-01T00:00:00Z' },
       ],
+      // Postgres lee el `+010000-…` de `toISOString()` como un offset: 500.
+      [
+        'startsAt que en UTC pasa al año 10000',
+        { startsAt: '9999-12-31T23:30:00-01:00' },
+      ],
     ])('con %s responde 400 { error }', async (_label, over) => {
       const { clinic, patient } = await madridPatient();
       const res = await t.http.post('/appointments').send({
@@ -184,6 +189,18 @@ describe('citas', () => {
       expect(res.status).toBe(400);
       expect(res.body).toEqual({
         error: 'startsAt must be an ISO 8601 date-time with a time zone',
+      });
+    });
+
+    it('con startsAt en el año 0 responde 400 de esquema antes que 404', async () => {
+      const res = await t.http.post('/appointments').send({
+        clinicId: randomUUID(),
+        patientId: randomUUID(),
+        startsAt: '0000-01-01T00:00:00Z',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'startsAt must be between the years 0001 and 9999 in UTC',
       });
     });
 

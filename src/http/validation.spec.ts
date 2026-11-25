@@ -1,4 +1,6 @@
+import { validateSync } from 'class-validator';
 import {
+  IsIsoDateTimeWithZone,
   isIsoDateTimeWithZone,
   parseIsoDateTimeWithZone,
 } from './validation.js';
@@ -14,6 +16,7 @@ describe('parseIsoDateTimeWithZone', () => {
     ['no tiene zona', '2027-03-28T10:00:00'],
     ['no tiene fecha', '10:00:00Z'],
     ['es una fecha ordinal', '2027-087T10:00:00Z'],
+    ['cae en el año 0 en UTC', '0001-01-01T00:30:00+01:00'],
   ])('lanza si la fecha %s', (_l, value) => {
     expect(() => parseIsoDateTimeWithZone(value)).toThrow(
       'not an ISO 8601 date-time with a time zone',
@@ -58,6 +61,33 @@ describe('isIsoDateTimeWithZone', () => {
     expect(isIsoDateTimeWithZone(value)).toBe(false);
   });
 
+  // MikroORM envía las fechas con `toISOString()`: Postgres no tiene año 0 y
+  // lee el `+010000-…` de un año de 5 cifras como un offset.
+  it.each([
+    ['el primer instante del año 1', '0001-01-01T00:00:00Z'],
+    ['el último segundo del año 9999', '9999-12-31T23:59:59Z'],
+    [
+      'una fecha del año 9999 que es del 9999 en UTC',
+      '9999-12-31T23:30:00+01:00',
+    ],
+  ])('acepta %s', (_label, value) => {
+    expect(isIsoDateTimeWithZone(value)).toBe(true);
+  });
+
+  it.each([
+    ['el año 0', '0000-01-01T00:00:00Z'],
+    [
+      'una fecha del año 1 que en UTC es del año 0',
+      '0001-01-01T00:30:00+01:00',
+    ],
+    [
+      'una fecha del año 9999 que en UTC es del 10000',
+      '9999-12-31T23:30:00-01:00',
+    ],
+  ])('rechaza %s', (_label, value) => {
+    expect(isIsoDateTimeWithZone(value)).toBe(false);
+  });
+
   it('rechaza un día que no existe', () => {
     expect(isIsoDateTimeWithZone('2027-02-30T10:00:00Z')).toBe(false);
   });
@@ -68,5 +98,30 @@ describe('isIsoDateTimeWithZone', () => {
 
   it('rechaza lo que no es texto', () => {
     expect(isIsoDateTimeWithZone(123)).toBe(false);
+  });
+});
+
+/** Mensajes de error de `value` con el decorador aplicado a la propiedad. */
+function errorsOf(decorator: PropertyDecorator, value: unknown): string[] {
+  class Body {
+    value: unknown;
+  }
+  decorator(Body.prototype, 'value');
+  const body = new Body();
+  body.value = value;
+  return validateSync(body).flatMap((e) => Object.values(e.constraints ?? {}));
+}
+
+describe('IsIsoDateTimeWithZone', () => {
+  it('pide la forma date-time cuando la fecha no la tiene', () => {
+    expect(errorsOf(IsIsoDateTimeWithZone(), '10:00:00Z')).toEqual([
+      'value must be an ISO 8601 date-time with a time zone',
+    ]);
+  });
+
+  it('dice el rango de años cuando la fecha tiene la forma pero no cabe', () => {
+    expect(errorsOf(IsIsoDateTimeWithZone(), '0000-01-01T00:00:00Z')).toEqual([
+      'value must be between the years 0001 and 9999 in UTC',
+    ]);
   });
 });

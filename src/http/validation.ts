@@ -15,23 +15,42 @@ import { ValidationError } from '../application/errors.js';
 const RFC_3339_DATE_TIME =
   /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
+// Años en UTC que llegan a Postgres. MikroORM envía las fechas con
+// `toISOString()`: Postgres no tiene año 0 (22008) y lee el `+010000-…` de un
+// año de 5 cifras como un offset (22009). Las dos acababan en 500.
+const MIN_UTC_YEAR = 1;
+const MAX_UTC_YEAR = 9999;
+
+/** La fecha si tiene la forma `date-time` del contrato y el día existe. */
+function parseRfc3339(value: unknown): DateTime<true> | null {
+  if (typeof value !== 'string' || !RFC_3339_DATE_TIME.test(value)) {
+    return null;
+  }
+  const parsed = DateTime.fromISO(value, { setZone: true });
+  return parsed.isValid ? parsed : null;
+}
+
+function hasStorableYear(date: DateTime<true>): boolean {
+  const { year } = date.toUTC();
+  return year >= MIN_UTC_YEAR && year <= MAX_UTC_YEAR;
+}
+
 /**
  * Fecha-hora con la forma `date-time` del contrato y zona explícita (`Z` u
- * offset). Luxon comprueba además que el día exista (no hay 30 de febrero).
+ * offset). Luxon comprueba además que el día exista (no hay 30 de febrero), y
+ * en UTC tiene que caer entre los años 1 y 9999, los que Postgres guarda.
  */
 export function isIsoDateTimeWithZone(value: unknown): boolean {
-  return (
-    typeof value === 'string' &&
-    RFC_3339_DATE_TIME.test(value) &&
-    DateTime.fromISO(value, { setZone: true }).isValid
-  );
+  const parsed = parseRfc3339(value);
+  return parsed !== null && hasStorableYear(parsed);
 }
 
 /**
  * Convierte en instante una fecha que ya pasó `@IsIsoDateTimeWithZone()`, con
  * el mismo parser que el validador.
  *
- * @throws Error si `value` no tiene esa forma (sin zona, sin fecha completa).
+ * @throws Error si `value` no tiene esa forma (sin zona, sin fecha completa)
+ * o cae fuera de los años 1 a 9999 en UTC.
  * Es un fallo de programación (el DTO la valida antes), así que el filtro da
  * 500; lo que nunca hace es completar la fecha con la de la máquina.
  */
@@ -53,8 +72,12 @@ export function IsIsoDateTimeWithZone(
       name: 'isIsoDateTimeWithZone',
       validator: {
         validate: isIsoDateTimeWithZone,
-        defaultMessage: (args) =>
-          `${args?.property ?? 'value'} must be an ISO 8601 date-time with a time zone`,
+        defaultMessage: (args) => {
+          const property = args?.property ?? 'value';
+          return parseRfc3339(args?.value) === null
+            ? `${property} must be an ISO 8601 date-time with a time zone`
+            : `${property} must be between the years 0001 and 9999 in UTC`;
+        },
       },
     },
     options,

@@ -476,6 +476,14 @@ describe('webhook de respuestas', () => {
         { ...valid, receivedAt: '2027-03-27T09:00:00' },
       ],
       ['con receivedAt que no es una fecha', { ...valid, receivedAt: 'ayer' }],
+      [
+        'con receivedAt en el año 0',
+        { ...valid, receivedAt: '0000-01-01T00:00:00Z' },
+      ],
+      [
+        'con receivedAt que en UTC pasa al año 10000',
+        { ...valid, receivedAt: '9999-12-31T23:30:00-01:00' },
+      ],
     ])('un cuerpo %s → 400 { error }', async (_label, body) => {
       const created = await sentAppointment();
       const res = await t.http
