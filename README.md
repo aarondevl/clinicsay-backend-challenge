@@ -241,8 +241,21 @@ Comportamientos conocidos que se cambiarían:
 - Un NUL en el `messageId` del webhook da 400, y el proveedor reenviaría el
   mensaje; se podría responder 200 y descartarlo, o guardar un hash del id.
 - `loadConfig` no valida las variables: un `PROVIDER_TIMEOUT_MS` que no es un
-  número da `NaN`, un `CLOCK_MODE` mal escrito pasa al reloj del sistema sin
-  avisar y un `PROVIDER_URL` con barra final llama a `//messages`.
+  número da `NaN`, y uno vacío da 0 ms, así que cada llamada vence al momento
+  y todo acaba `failed` tras los reintentos; un `CLOCK_MODE` mal escrito pasa
+  al reloj del sistema sin avisar y un `PROVIDER_URL` con barra final llama a
+  `//messages`.
+- `POST /clinics` acepta la zona con otras mayúsculas (`europe/madrid`) y la
+  guarda tal cual, porque Intl no distingue mayúsculas.
+- `PUT /test/clock` valida la fecha con `@IsIsoDateTimeWithZone()` pero la
+  convierte con `new Date()` y no con `parseIsoDateTimeWithZone`, el parser
+  que comparten las demás entradas.
+- `isDatabaseUnavailable` no reconoce `ENETUNREACH`, `ECONNABORTED` ni
+  `EHOSTDOWN`: una caída de la base con esos códigos da 500 en vez de 503.
+- Las migraciones al arrancar no toman un bloqueo: dos réplicas que arrancan a
+  la vez pueden aplicarlas a la vez.
+- El `HEALTHCHECK` del `Dockerfile` pide `/health` en el puerto 3000 aunque la
+  app escucha en `PORT`: con otro puerto el contenedor queda `unhealthy`.
 - Un `PATCH` con el mismo `startsAt` desconfirma la cita y crea otro
   recordatorio (lectura literal de la regla 8).
 - Un offset con el signo menos de Unicode (`−05:00`) pasa como zona válida;
@@ -255,7 +268,9 @@ Comportamientos conocidos que se cambiarían:
   cual, sin normalizar; un mensaje ignorado no deja traza; e
   `inbound_message` crece sin purga.
 - `/health` no comprueba que las migraciones sigan aplicadas si la base se
-  recrea en caliente, y el pool no tiene `connectionTimeoutMillis`.
+  recrea en caliente, y el pool no tiene `connectionTimeoutMillis`: con varias
+  pasadas largas a la vez, que retienen sus conexiones mientras esperan al
+  proveedor, el resto de la API espera una conexión libre sin límite.
 
 Tests y código:
 
