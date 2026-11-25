@@ -95,7 +95,8 @@ Capas con las dependencias hacia dentro, `http` → `application` → `domain`, 
   mismo.
 - **Una transacción por recordatorio.** Dentro se vuelven a comprobar las
   reglas con la hora del servicio (`too_late`, `no_phone`, `opted_out`, en ese
-  orden), se llama al proveedor y se guarda el resultado antes del `COMMIT`.
+  orden, y después la franja de silencio de un primer intento), se llama al
+  proveedor y se guarda el resultado antes del `COMMIT`.
   La llamada va dentro de la transacción a propósito: mientras dura, la fila
   sigue bloqueada y ninguna otra pasada puede repetir ese intento.
 - **`Idempotency-Key` = id del recordatorio en todos los intentos.** Tras un
@@ -143,6 +144,15 @@ acabe la franja de silencio.
   siguientes. Las horas que no existen o se repiten el día del cambio (de
   02:00 a 03:00 en la península y de 01:00 a 02:00 en Canarias) caen dentro de
   la franja y acaban también a las 09:00.
+- La franja se aplica al planificar y otra vez al enviar. Si el job toma un
+  primer intento dentro de ella (un cron atrasado, una cola acumulada, un
+  envío previsto a las 20:59 que se toma a las 21:00), no llama al proveedor:
+  el recordatorio sigue `pending`, con los mismos `attempts` y
+  `scheduledFor`, y su próximo intento pasa a las 09:00 siguientes de la zona
+  de la cita. Si esa hora no queda antes de la cita, queda `skipped` con
+  `too_late`. El aplazado no cuenta en `processed`, porque no se envió, ni se
+  reintentó, ni se descartó. Los reintentos no esperan, como dice el
+  enunciado.
 - Solo se aceptan zonas IANA: `local`, `system` y los offsets fijos (`+01:00`)
   dan 400, porque dependen de la máquina o no tienen cambio de horario.
 - Los tests usan los bordes del enunciado: los dos cambios de horario,
@@ -174,7 +184,8 @@ acabe la franja de silencio.
   que una cita creada sin el campo tiene exactamente la forma del contrato.
 - **Reintentos:** 1 y 5 minutos, 3 intentos, como dice el enunciado (en la
   reunión se habló de cada minuto). Se cambian en una constante.
-- **Franja:** siempre las 09:00 siguientes en hora local.
+- **Franja:** siempre las 09:00 siguientes en hora local, también para un
+  primer intento que el job toma ya dentro de la franja.
 - **Rechazo del proveedor:** 422 y cualquier otro 4xx dejan `failed`; cualquier
   2xx es `sent`.
 - **Reloj de pruebas:** usa la hora del sistema hasta el primer `PUT` y desde
@@ -230,8 +241,21 @@ Comportamientos conocidos que se cambiarían:
 - Un NUL en el `messageId` del webhook da 400, y el proveedor reenviaría el
   mensaje; se podría responder 200 y descartarlo, o guardar un hash del id.
 - `loadConfig` no valida las variables: un `PROVIDER_TIMEOUT_MS` que no es un
-  número da `NaN`, un `CLOCK_MODE` mal escrito pasa al reloj del sistema sin
-  avisar y un `PROVIDER_URL` con barra final llama a `//messages`.
+  número da `NaN`, y uno vacío da 0 ms, así que cada llamada vence al momento
+  y todo acaba `failed` tras los reintentos; un `CLOCK_MODE` mal escrito pasa
+  al reloj del sistema sin avisar y un `PROVIDER_URL` con barra final llama a
+  `//messages`.
+- `POST /clinics` acepta la zona con otras mayúsculas (`europe/madrid`) y la
+  guarda tal cual, porque Intl no distingue mayúsculas.
+- `PUT /test/clock` valida la fecha con `@IsIsoDateTimeWithZone()` pero la
+  convierte con `new Date()` y no con `parseIsoDateTimeWithZone`, el parser
+  que comparten las demás entradas.
+- `isDatabaseUnavailable` no reconoce `ENETUNREACH`, `ECONNABORTED` ni
+  `EHOSTDOWN`: una caída de la base con esos códigos da 500 en vez de 503.
+- Las migraciones al arrancar no toman un bloqueo: dos réplicas que arrancan a
+  la vez pueden aplicarlas a la vez.
+- El `HEALTHCHECK` del `Dockerfile` pide `/health` en el puerto 3000 aunque la
+  app escucha en `PORT`: con otro puerto el contenedor queda `unhealthy`.
 - Un `PATCH` con el mismo `startsAt` desconfirma la cita y crea otro
   recordatorio (lectura literal de la regla 8).
 - Un offset con el signo menos de Unicode (`−05:00`) pasa como zona válida;
@@ -244,7 +268,9 @@ Comportamientos conocidos que se cambiarían:
   cual, sin normalizar; un mensaje ignorado no deja traza; e
   `inbound_message` crece sin purga.
 - `/health` no comprueba que las migraciones sigan aplicadas si la base se
-  recrea en caliente, y el pool no tiene `connectionTimeoutMillis`.
+  recrea en caliente, y el pool no tiene `connectionTimeoutMillis`: con varias
+  pasadas largas a la vez, que retienen sus conexiones mientras esperan al
+  proveedor, el resto de la API espera una conexión libre sin límite.
 
 Tests y código:
 
@@ -262,7 +288,7 @@ Tests y código:
 Producto:
 
 - Configuración por clínica (franja de silencio, horario de atención): hoy la
-  franja es una constante del dominio, y `outOfQuietHours` supone una franja
+  franja es una constante del dominio, y `endOfQuietHours` supone una franja
   que cruza la medianoche.
 - La firma del webhook (ver la nota de producción), RLS por clínica y
   autenticación.
@@ -379,6 +405,10 @@ el estado del documento de diseño):
 - Un recordatorio con un error inesperado cortaba la pasada y, como iba
   primero, bloqueaba la cola en todas las siguientes. Un test de error de red
   apuntaba a un puerto recién liberado que otro proceso llegó a ocupar (#12).
+- La franja de silencio solo se aplicaba al planificar: un primer intento que
+  el job tomaba entre las 21:00 y las 09:00 salía en ese momento, aunque el
+  enunciado solo deja pasar a los reintentos. Lo encontró la revisión final de
+  `main`; ahora se aplaza a las 09:00 sin llamar al proveedor (#14).
 
 ## Reglas de código
 

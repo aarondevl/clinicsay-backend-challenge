@@ -154,7 +154,7 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 | Indicación en la reunión | Relación con el enunciado | Cómo se incorpora |
 |---|---|---|
 | Citas virtuales con hora peninsular (Madrid) y la misma franja de silencio | No aparece; no lo contradice | Campo opcional `virtual` (por defecto `false`) en `POST /appointments`. La respuesta solo lo incluye cuando vale `true`, así que una cita creada sin el campo responde exactamente con la forma del contrato. Con `true`, hora de envío, franja y texto usan `Europe/Madrid`. Sin el campo, todo funciona como dice el contrato. |
-| Reintentar cada minuto | Choca (1 min y 5 min, 3 intentos) | Se aplica el enunciado. Los retrasos viven en una sola constante del dominio y se cambian en una línea. Se cuenta en el README. |
+| Reintentar cada minuto | Difiere del enunciado (1 min y 5 min, 3 intentos) | Se aplica el enunciado. Los retrasos viven en una sola constante del dominio y se cambian en una línea. Se cuenta en el README. |
 | Si cae en la franja, a las 09:00 del día siguiente | Coincide entre 21:00 y 24:00; entre 00:00 y 09:00 el enunciado dice «las 09:00 siguientes» | Siempre la siguiente 09:00 local. |
 | La clínica tiene su configuración (zona, horario de atención) | El contrato solo tiene `timezone` | Franja como constante del dominio; configuración por clínica en «qué haría con más tiempo». |
 | Clave única para no duplicar; comprobar si un 504 se entregó antes de reintentar | Compatible | `Idempotency-Key` = id del recordatorio en todos sus intentos. El reintento con la misma clave es la comprobación: si ya se entregó, el proveedor responde 200 `duplicate`. |
@@ -169,7 +169,7 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 | Desplegar sin cortar a las clínicas y respetando las ejecuciones en curso | Compatible | Cierre ordenado: al recibir SIGTERM no se toman más recordatorios y se espera a la pasada en curso. Despliegue gradual y migraciones compatibles en la nota de producción. |
 | Redis u otras herramientas para colas | Permitido | No hace falta: Postgres con `SKIP LOCKED` hace de cola. Redis o SQS en la nota de producción. |
 | 3-4 horas como meta | Compatible | Primero el flujo principal; lo que falte se cuenta en el README. |
-| 2 000 recordatorios al día | Choca (20 000) | La nota de producción usa 20 000. |
+| 2 000 recordatorios al día | Difiere del enunciado (20 000) | La nota de producción usa 20 000. |
 
 ### Ambigüedades y cómo se resuelven (se cuentan en el README)
 
@@ -359,7 +359,34 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     (reproducido). La clasificación de `classifyProviderResult` no cambia:
     cambia qué resultado le llega;
   - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
-    fallidos y descartados;
+    fallidos y descartados. Un aplazado por la franja no cuenta (punto
+    siguiente);
+  - la franja de silencio también se mira al enviar (2026-11-24). La regla 3
+    dice que entre las 21:00 y las 09:00 no se envía nada, y el enunciado
+    solo exceptúa a los reintentos. Aplicarla solo al planificar dejaba
+    salir un primer intento que el job tomaba dentro de la franja: un cron
+    atrasado, una cola acumulada tras una caída o un `scheduledFor` justo
+    antes de las 21:00 que se toma a las 21:00 (reproducido: la cita del
+    11/03/2027 a las 10:00 de Madrid, creada a las 20:59:30 del día antes,
+    salía con la pasada de las 21:00). Ahora, después de los descartes
+    (`too_late`, `no_phone`, `opted_out`, que no llaman) y antes de llamar,
+    `holdForQuietHours` mira si un recordatorio con `attempts` 0 cae en la
+    franja de la zona efectiva (`effectiveTimeZone`, así que una cita
+    virtual usa la de Madrid). Si cae, no se llama al proveedor:
+    - sigue `pending`, con los mismos `attempts` y el mismo `scheduledFor`,
+      y `next_attempt_at` pasa a las 09:00 siguientes (`quietHoursEnd`, que
+      usa la misma lógica y la misma `QUIET_HOURS` que `planReminder`). Es
+      lo que hace un reintento, y `scheduledFor` sigue diciendo la hora que
+      se planificó;
+    - si esas 09:00 no quedan antes del inicio de la cita, queda
+      `skipped`/`too_late` ya, con la misma regla que al crearlo, en vez de
+      esperar a una hora en la que la cita ya habrá empezado.
+
+    El aplazado no cuenta en `processed`: el contrato lo define como los
+    recordatorios que la pasada envió, reintentó o descartó, y este no es
+    ninguno de los tres; contarlo haría que una pasada nocturna sin envíos
+    respondiera como si hubiera trabajado. El `too_late` sí cuenta, porque
+    es un descarte;
   - un error inesperado dentro de la transacción de un recordatorio
     (2026-11-24) deshace solo esa transacción. La pasada lo registra con su
     id, no lo cuenta en `processed`, no lo vuelve a tomar y sigue con los
@@ -1855,3 +1882,44 @@ Rama `docs/entrega`.
   down -v`. Siguiente paso: revisar y mergear la PR #13 con `checks` y
   `compose` en verde antes del cierre (25-11-2026, 17:30 de Madrid). No
   queda otra tarea del plan.
+- 2026-11-24: arreglado en `fix/franja-al-enviar`, PR
+  [#14](https://github.com/aarondevl/clinicsay-backend-challenge/pull/14),
+  el hallazgo importante de la revisión final de `main`: la franja de
+  silencio solo se aplicaba al planificar (`planReminder`) y no al enviar.
+  - escenario: una cita del 11/03/2027 a las 10:00 de Madrid creada a las
+    20:59:30 del día antes tiene `scheduledFor` a esa hora; la pasada de las
+    21:00 la enviaba. Igual con un cron atrasado o una cola acumulada que se
+    toma a las 23:00. `RunReminderPass` solo miraba `too_late`, `no_phone` y
+    `opted_out` antes de llamar, y la regla 3 dice que en la franja no se
+    envía nada salvo los reintentos;
+  - arreglo (sección 2, «Job de envío»): `quietHoursEnd` en
+    `reminder-schedule.ts` reutiliza la lógica de `planReminder`
+    (`outOfQuietHours` pasa a `endOfQuietHours` y devuelve `null` fuera de
+    la franja), y `holdForQuietHours` y `postponeReminder` en `reminder.ts`
+    deciden el aplazamiento. La pasada lo aplica tras los descartes y antes
+    de llamar, con la zona efectiva; un aplazado no cuenta en `processed` y
+    el `too_late` sí;
+  - en la misma rama y solo de texto: los hallazgos menores de la revisión
+    final en el apartado 3 del README (la línea del pool se amplía en vez de
+    repetirse) y «Difiere del enunciado» en lugar de «Choca» en la tabla de
+    indicaciones del expositor. El README usa «chocaba» solo para el
+    puerto, en otro sentido, y no cambia;
+  - sin migraciones ni dependencias nuevas.
+
+  Cada test nuevo se vio fallar por su motivo. Contra la pasada de `main`,
+  cuatro e2e en rojo: 21:00, 23:00 y la cita virtual de Canarias daban
+  `{ processed: 1 }` en vez de 0, y la de las 09:00 quedaba `sent` con
+  `attempts` 1 en vez de `skipped`/`too_late`. Los 18 unitarios nuevos
+  fallaban porque las funciones no existían. Los que protegen lo que ya
+  funcionaba caen con una mutación cada uno: sin la condición de
+  `attempts > 0`, el e2e y el unitario del reintento dentro de la franja;
+  con la zona de la clínica en vez de la efectiva, el e2e de la cita
+  virtual; y sin `assertPending` en `postponeReminder`, su unitario.
+
+  Verificación: `npm run verify` en verde (19 archivos y 231 unitarios, 8
+  archivos y 190 e2e), `docker compose -p clinicsay up --build -d --wait` con
+  los tres servicios sanos y `./scripts/smoke.sh` con `exit=0`. Con el
+  compose, el escenario a mano: `{"processed":0}` a las 21:00, sin
+  peticiones al proveedor y `pending` con `attempts` 0; a las 09:00,
+  `{"processed":1}`, `sent` con `sentAt` 2027-03-11T08:00:00Z y
+  `scheduledFor` sin cambiar. Siguiente paso: revisar y mergear la PR #14.
