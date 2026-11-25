@@ -1,7 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { Logger } from '@nestjs/common';
+import { ServiceUnavailableError } from '../src/application/errors.js';
+import { Clock } from '../src/application/ports/clock.js';
+import { MessageProvider } from '../src/application/ports/message-provider.js';
+import type { Repositories } from '../src/application/ports/repositories.js';
 import { Transactions } from '../src/application/ports/transactions.js';
 import { RunReminderPass } from '../src/application/reminders/run-reminder-pass.js';
 import type { Reminder } from '../src/domain/reminder.js';
+import { ShutdownCoordinator } from '../src/http/shutdown-coordinator.js';
 import {
   startTestApp,
   TEST_PROVIDER_PORT,
@@ -17,6 +23,7 @@ import {
   type ReminderBody,
 } from './support/fixtures.js';
 import { holdLock } from './support/locks.js';
+import { type ResetServer, startResetServer } from './support/reset-server.js';
 import { startTcpProxy, type TcpProxy } from './support/tcp-proxy.js';
 
 // Hora del servicio al crear las citas.
@@ -525,6 +532,49 @@ describe('job de envío', () => {
       }
     });
 
+    it('un error inesperado en un recordatorio no frena a los demás: sigue pending, sin contarse, y se registra con su id', async () => {
+      const broken = await madridAppointment();
+      const healthy = await madridAppointment({
+        patient: { name: 'Luis', phone: '+34600333444' },
+      });
+      // Una zona que la API nunca acepta: `buildReminderText` lanza al ir a
+      // enviarlo. Es el primero que toma la pasada (misma hora, id menor).
+      await t.orm.em
+        .getConnection()
+        .execute(`update clinic set timezone = 'Nope/Zone' where id = ?`, [
+          broken.clinicId,
+        ]);
+      const brokenId = broken.reminders[0]?.id;
+      const errors = vi
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        await t.setClock(T);
+        expect(await runJob()).toEqual({ processed: 1 });
+        expect(await onlyReminder(broken.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+        expect(await onlyReminder(healthy.id)).toMatchObject({
+          status: 'sent',
+        });
+        expect(errors).toHaveBeenCalledWith(
+          expect.stringContaining(`reminder ${brokenId}`),
+          expect.any(Error),
+        );
+
+        // La pasada siguiente lo vuelve a tomar primero y tampoco se queda en él.
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await onlyReminder(broken.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+        expect(await t.provider.requests()).toHaveLength(1);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
     it('con la señal abortada no toma ningún recordatorio', async () => {
       const created = await madridAppointment();
       await t.setClock(T);
@@ -538,20 +588,85 @@ describe('job de envío', () => {
     });
   });
 
+  describe('errores que cortan la pasada', () => {
+    /** La pasada de la app con otras transacciones y un registro de errores propio. */
+    function passWith(tx: Transactions, logger = { error: vi.fn() }) {
+      return new RunReminderPass(
+        tx,
+        t.app.get(Clock),
+        t.app.get(MessageProvider),
+        logger,
+      );
+    }
+
+    it('la base caída al confirmar un recordatorio corta la pasada (503) sin tomar el siguiente ni registrarlo como fallo suyo', async () => {
+      const first = await madridAppointment();
+      const second = await madridAppointment({
+        patient: { name: 'Luis', phone: '+34600333444' },
+      });
+      await t.setClock(T);
+      // Como si la conexión se cortara en el COMMIT: el proveedor ya lo recibió.
+      class CommitFails extends Transactions {
+        run<V>(work: (repos: Repositories) => Promise<V>): Promise<V> {
+          return transactions.run(async (repos) => {
+            await work(repos);
+            throw new ServiceUnavailableError('database unavailable');
+          });
+        }
+      }
+      const logger = { error: vi.fn() };
+      await expect(
+        passWith(new CommitFails(), logger).execute(),
+      ).rejects.toBeInstanceOf(ServiceUnavailableError);
+      expect(await t.provider.requests()).toHaveLength(1);
+      expect(logger.error).not.toHaveBeenCalled();
+      for (const appointment of [first, second]) {
+        expect(await onlyReminder(appointment.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+      }
+    });
+
+    it('un error antes de tomar ningún recordatorio corta la pasada en vez de repetirse sin fin', async () => {
+      await madridAppointment();
+      await t.setClock(T);
+      const boom = new Error('lockNextDue failed');
+      class LockFails extends Transactions {
+        run<V>(): Promise<V> {
+          return transactions.run(async () => {
+            throw boom;
+          });
+        }
+      }
+      // Si la pasada no se corta, la señal la para al acabar el test.
+      const stop = new AbortController();
+      try {
+        await expect(
+          within(2000, passWith(new LockFails()).execute(stop.signal)),
+        ).rejects.toBe(boom);
+      } finally {
+        stop.abort();
+      }
+    });
+  });
+
   describe('sin conexión con el proveedor', () => {
     let offline: TestApp;
+    let resetting: ResetServer;
 
     beforeAll(async () => {
-      // Un puerto que acaba de quedar libre: la conexión se rechaza.
-      const closed = await startTcpProxy('127.0.0.1', TEST_PROVIDER_PORT);
-      await closed.close();
+      // Un servidor propio que corta cada conexión al aceptarla. Un puerto
+      // recién liberado no vale: otro proceso puede ocuparlo y responder.
+      resetting = await startResetServer();
       offline = await startTestApp({
-        providerUrl: `http://127.0.0.1:${closed.port}`,
+        providerUrl: `http://127.0.0.1:${resetting.port}`,
       });
     });
 
     afterAll(async () => {
       await offline.close();
+      await resetting.close();
     });
 
     it('un error de red se reintenta al minuto', async () => {
@@ -653,9 +768,10 @@ describe('job de envío', () => {
   describe('cierre ordenado', () => {
     const OTHER_PHONE = '+34600333444';
 
-    // Que el cierre espere a la pasada lo prueba shutdown-coordinator.spec.ts:
-    // aquí no se ve, porque `server.close()` espera a la petición en curso y
-    // el pool de `pg` espera a que la transacción suelte su conexión.
+    // Con `close()` no se ve que el cierre espere a la pasada, porque
+    // `server.close()` espera a la petición en curso y el pool de `pg` a que
+    // la transacción suelte su conexión. Por eso el segundo test llama al
+    // coordinador directamente.
     it('al cerrar la app, la pasada en curso termina su recordatorio y no toma más', async () => {
       // El proveedor recibe las peticiones pero no responde: la pasada se
       // queda esperando 1 s con el primer recordatorio.
@@ -703,6 +819,51 @@ describe('job de envío', () => {
         attempts: 0,
       });
       expect(await t.provider.requests(OTHER_PHONE)).toEqual([]);
+    });
+
+    it('el coordinador espera a la pasada que lanzó el controlador antes de dejar cerrar', async () => {
+      // Sin cerrar el servidor HTTP ni la base, lo único que puede hacer
+      // esperar al coordinador es que el controlador le registrara la pasada.
+      const proxy = await startTcpProxy('127.0.0.1', TEST_PROVIDER_PORT);
+      const waiting = await startTestApp({
+        providerUrl: `http://127.0.0.1:${proxy.port}`,
+        providerTimeoutMs: 1000,
+      });
+      try {
+        await waiting.setClock(NOW);
+        const created = await madridAppointment({ app: waiting });
+        await waiting.setClock(T);
+        proxy.dropResponses(true);
+
+        const running = waiting.http
+          .post('/jobs/reminders/run')
+          .then((res) => res);
+        await until(async () => (await t.provider.requests(PHONE)).length > 0);
+        await waiting.app.get(ShutdownCoordinator).beforeApplicationShutdown();
+        // Sin esperar, la pasada seguiría con el proveedor y el intento sin
+        // confirmar (attempts 0).
+        expect(await onlyReminder(created.id)).toMatchObject({
+          status: 'pending',
+          attempts: 1,
+        });
+        const res = await running;
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ processed: 1 });
+      } finally {
+        await waiting.close();
+        await proxy.close();
+      }
+    });
+
+    it('createApp escucha SIGTERM para cerrar la app, y close() deja de escucharlo', async () => {
+      const before = process.listenerCount('SIGTERM');
+      const started = await startTestApp();
+      try {
+        expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+      } finally {
+        await started.close();
+      }
+      expect(process.listenerCount('SIGTERM')).toBe(before);
     });
   });
 });

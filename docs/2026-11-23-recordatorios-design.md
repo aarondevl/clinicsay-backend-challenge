@@ -351,10 +351,22 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     timeout (`AbortSignal.timeout`) cubre también la lectura del cuerpo;
   - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
     fallidos y descartados;
-  - un error dentro de la transacción de un recordatorio corta la pasada
-    (500, o 503 con la base caída). Lo que no llegó a confirmarse sigue
-    pendiente con sus intentos anteriores y la siguiente pasada lo repite con
-    la misma clave, sin duplicar el mensaje;
+  - un error inesperado dentro de la transacción de un recordatorio
+    (2026-11-24) deshace solo esa transacción. La pasada lo registra con su
+    id, no lo cuenta en `processed`, no lo vuelve a tomar y sigue con los
+    demás. Antes cortaba la pasada con un 500 y, como ese recordatorio va
+    primero por `next_attempt_at`, también todas las siguientes (reproducido
+    con una zona inválida puesta por SQL). Sigue `pending` con sus intentos
+    anteriores y no se marca `failed`: el error pudo llegar después de que el
+    proveedor lo aceptara, y la siguiente pasada lo repite con la misma clave
+    sin duplicar el mensaje. Sí cortan la pasada la base caída
+    (`ServiceUnavailableError`, 503) y un error antes de tomar ningún
+    recordatorio, que si no se repetiría sin fin;
+  - el id del recordatorio con error se apunta en los excluidos de la pasada
+    en cuanto se bloquea, y no viaja en el error: envolver el error dentro de
+    la transacción le ocultaría a `isDatabaseUnavailable`, que solo mira el
+    propio error, que la base se ha caído. Se registra con un puerto `Logger`
+    porque `src/application` no puede importar el de Nest;
   - el cierre ordenado aborta la señal y espera en
     `beforeApplicationShutdown`. En `onApplicationShutdown` llegaría tarde:
     antes Nest cierra el servidor HTTP, que espera a la petición del job, y
@@ -1695,3 +1707,61 @@ Rama `docs/entrega`.
   año 9999, un reintento cae en el año 10000 y el job da 500 (reproducido
   con `9999-12-31T23:58:00Z` y dos 503). No es una entrada, sino una fecha
   calculada, y con el reloj del sistema no se da.
+- 2026-11-24: arreglado en `fix/aislar-recordatorio` el hallazgo I1 de la
+  revisión de `main` previa a la tarea 9, junto con el menor M1 y un e2e que
+  fallaba a veces.
+  - I1: un error inesperado dentro de la transacción de un recordatorio
+    cortaba la pasada con un 500. Como ese recordatorio seguía pendiente con
+    el `next_attempt_at` más antiguo, bloqueaba la cola en todas las pasadas
+    siguientes. Reproducido con dos clínicas con una cita cada una y la
+    primera con `timezone = 'Nope/Zone'` escrita por SQL: `buildReminderText`
+    lanzaba `invalid time zone`, el job daba 500 y la segunda cita no salía
+    de `pending`. Ahora `RunReminderPass` registra el error con el id, no lo
+    cuenta en `processed`, lo aparta de la pasada y sigue; queda `pending` y
+    no `failed` (sección 2, «Job de envío»). Siguen cortando la pasada la
+    base caída (503) y un error antes de tomar ningún recordatorio;
+  - entran el puerto `Logger` y `NestLogger`, porque `src/application` no
+    puede importar el de Nest. Cada `useFactory` crea el suyo con el nombre
+    del caso de uso como contexto. El id se apunta en los excluidos en cuanto
+    se bloquea el recordatorio, en vez de viajar en el error, para no
+    ocultarle a `isDatabaseUnavailable` una caída de la base;
+  - M1: un e2e llama a `beforeApplicationShutdown` del coordinador sin cerrar
+    la app, con la pasada esperando al proveedor, y comprueba que al volver
+    el intento ya está guardado. Otro cuenta los listeners de SIGTERM antes y
+    después de `createApp`. Ahora se detecta que el controlador deje de usar
+    `track` (la entrada de la tarea 7 lo daba por no cubierto) o que falte
+    `enableShutdownHooks()`;
+  - «un error de red se reintenta al minuto» apuntaba a un puerto recién
+    liberado, que otro proceso llegó a ocupar y contestar con un 4xx (el
+    recordatorio quedaba `failed`). Ahora apunta a `startResetServer`
+    (`test/support/reset-server.ts`), que corta cada conexión con un RST al
+    aceptarla, y `fetch` falla con `ECONNRESET`;
+  - sin migraciones ni dependencias nuevas.
+
+  Cada test nuevo se vio fallar por su motivo. El de I1, contra la pasada de
+  `main`: 500 en vez de 200. Los otros cuatro protegen comportamiento que ya
+  existía y caen con una mutación cada uno: sin la excepción de
+  `ServiceUnavailableError`, el proveedor recibe 2 peticiones en vez de 1;
+  sin cortar cuando no se tomó nada, la pasada sigue tras 2 s; sin `track`,
+  `attempts` 0 en vez de 1; y sin `enableShutdownHooks()`, ningún listener
+  de SIGTERM de más. Quitar el registro del error hace fallar el de I1 (0
+  llamadas), y el unitario de `NestLogger` cae con un esqueleto vacío y sin
+  el contexto. El del error de red pasa 3 de 3 veces y cae si ese error se
+  trata como un 422.
+
+  Queda para otro cambio o para la nota de producción: un recordatorio que
+  falla siempre se reintenta en cada pasada, sin límite, y si el error llega
+  después de la llamada el proveedor recibe una petición por pasada (con la
+  misma clave, así que el paciente no recibe dos mensajes). Haría falta
+  contar los errores o apartarlo para revisión. Por el mismo camino, el
+  reintento que cae en el año 10000 (entrada anterior) debería pasar de
+  500 a quedar registrado sin frenar a los demás; no se ha reproducido.
+
+  Verificación: `npm run verify` en verde tras el merge de `main`
+  (19 archivos y 212 unitarios, 8 archivos y 185 e2e) y
+  `docker compose -p clinicsay up --build -d --wait` con el escenario a
+  mano: dos pasadas con 200 `{ processed: 1 }` y `{ processed: 0 }`, la cita
+  de la clínica rota `pending` con `attempts` 0, la otra `sent` y en el log
+  de la api el id del recordatorio junto a `invalid time zone: Nope/Zone`.
+  `scripts/smoke.sh` llega con la tarea 9. Siguiente paso: revisar y mergear
+  la PR.

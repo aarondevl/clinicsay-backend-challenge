@@ -6,7 +6,9 @@ import {
 } from '../../domain/reminder.js';
 import { buildReminderText } from '../../domain/reminder-message.js';
 import { effectiveTimeZone } from '../../domain/time-zones.js';
+import { ServiceUnavailableError } from '../errors.js';
 import type { Clock } from '../ports/clock.js';
+import type { Logger } from '../ports/logger.js';
 import type { MessageProvider } from '../ports/message-provider.js';
 import type { Repositories } from '../ports/repositories.js';
 import type { Transactions } from '../ports/transactions.js';
@@ -27,6 +29,7 @@ export class RunReminderPass {
     private readonly transactions: Transactions,
     private readonly clock: Clock,
     private readonly provider: MessageProvider,
+    private readonly logger: Logger,
   ) {}
 
   /**
@@ -36,35 +39,64 @@ export class RunReminderPass {
    * con `Idempotency-Key` = id del recordatorio y se guarda el resultado
    * antes del `COMMIT`.
    *
+   * Si un recordatorio lanza cualquier otro error, su transacción se deshace,
+   * se registra con su id y la pasada sigue con los demás. No cuenta en
+   * `processed` y sigue `pending` para las pasadas siguientes.
+   *
    * @param signal Al abortarse no se toma ningún recordatorio más; el que
    * esté en curso termina y se guarda (cierre ordenado).
    * @throws {ServiceUnavailableError} si la base no responde; lo ya tratado
    * queda guardado.
+   * @throws el error tal cual si llega antes de tomar ningún recordatorio.
    */
   async execute(signal?: AbortSignal): Promise<ReminderPassResult> {
-    // Los que ya trató esta pasada no se vuelven a tomar aunque sigan
-    // pendientes: así la pasada siempre termina.
-    const handled: string[] = [];
+    // Los que ya tomó esta pasada, tratados o con error, no se vuelven a
+    // tomar aunque sigan pendientes: así la pasada siempre termina.
+    const taken: string[] = [];
+    let processed = 0;
     while (!signal?.aborted) {
-      const id = await this.transactions.run((repos) =>
-        this.handleNext(repos, handled),
-      );
-      if (id === null) break;
-      handled.push(id);
+      const before = taken.length;
+      try {
+        const found = await this.transactions.run((repos) =>
+          this.handleNext(repos, taken),
+        );
+        if (!found) break;
+        processed++;
+      } catch (error) {
+        // `handleNext` apunta el id en cuanto lo bloquea, así que sigue ahí
+        // aunque la transacción se haya deshecho.
+        const failedId = taken.length > before ? taken.at(-1) : undefined;
+        // La base caída corta la pasada (503). Sin recordatorio tomado no hay
+        // a quién apartar, y seguir repetiría el mismo error sin fin.
+        if (
+          error instanceof ServiceUnavailableError ||
+          failedId === undefined
+        ) {
+          throw error;
+        }
+        // No se marca `failed`: el error pudo llegar después de que el
+        // proveedor lo aceptara. La pasada siguiente lo repite con la misma
+        // `Idempotency-Key`, sin duplicar el mensaje.
+        this.logger.error(
+          `reminder ${failedId} failed and stays pending`,
+          error,
+        );
+      }
     }
-    return { processed: handled.length };
+    return { processed };
   }
 
-  /** Trata el siguiente recordatorio que toca; devuelve su id, o `null` si no hay. */
+  /**
+   * Trata el siguiente recordatorio que toca y apunta su id en `taken` en
+   * cuanto lo bloquea. Devuelve `false` si no queda ninguno.
+   */
   private async handleNext(
     repos: Repositories,
-    handled: string[],
-  ): Promise<string | null> {
-    const reminder = await repos.reminders.lockNextDue(
-      this.clock.now(),
-      handled,
-    );
-    if (!reminder) return null;
+    taken: string[],
+  ): Promise<boolean> {
+    const reminder = await repos.reminders.lockNextDue(this.clock.now(), taken);
+    if (!reminder) return false;
+    taken.push(reminder.id);
 
     // La cita se lee sin bloquearla. Con el recordatorio bloqueado, esperar
     // el bloqueo de la cita cerraría un ciclo con un PATCH o un cancelar, que
@@ -100,7 +132,7 @@ export class RunReminderPass {
       await repos.reminders.update(
         skipReminder(reminder, reason ?? 'no_phone'),
       );
-      return reminder.id;
+      return true;
     }
 
     const result = await this.provider.send({
@@ -121,6 +153,6 @@ export class RunReminderPass {
     await repos.reminders.update(
       recordAttempt(reminder, outcome, { now: this.clock.now(), to, sendSeq }),
     );
-    return reminder.id;
+    return true;
   }
 }
