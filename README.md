@@ -5,7 +5,8 @@ paciente un recordatorio el día anterior a través de un proveedor de mensajes
 y aplica las respuestas SI/NO que llegan por un webhook.
 
 - Enunciado: [`enunciado.pdf`](enunciado.pdf). Contrato de la API:
-  [`openapi.yaml`](openapi.yaml). Proveedor simulado: [`provider/`](provider/).
+  [`openapi.yaml`](openapi.yaml), navegable en [`docs/api.html`](docs/api.html)
+  (ver apartado 1). Proveedor simulado: [`provider/`](provider/).
 - Decisiones con su porqué y estado del trabajo:
   [`docs/2026-11-23-recordatorios-design.md`](docs/2026-11-23-recordatorios-design.md).
 - Guía para agentes y personas que cambien el código (mapa regla → archivo →
@@ -66,6 +67,19 @@ docker compose down -v
 `{"processed":1}`, el texto exacto y la `Idempotency-Key` en el proveedor, y
 sale con 1 y un mensaje si algo no cuadra. Se puede repetir sobre la misma
 base. `API_URL` y `PROVIDER_URL` cambian los destinos.
+
+Documentación de la API: [`docs/api.html`](docs/api.html) muestra
+`openapi.yaml` con Redoc y lo lee al abrirse, así que siempre enseña el
+contrato del repo, sin copia que se desincronice. `fetch` no lee archivos con
+`file://` (abierta así, la página explica qué hacer). Para verla basta un
+servidor estático desde la raíz del repo, sin instalar nada en él:
+
+```bash
+python3 -m http.server 8000 --bind 127.0.0.1   # y abrir http://localhost:8000/docs/api.html
+```
+
+Redoc (2.5.4) se descarga de jsDelivr con la versión exacta y su hash SRI, así
+que hace falta conexión; si no carga, la página lo dice.
 
 CI (`.github/workflows/ci.yml`), obligatorio para entrar en `main`:
 

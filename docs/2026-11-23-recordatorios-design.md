@@ -2028,3 +2028,21 @@ Rama `docs/entrega`.
   con api y db sanas y el proveedor arriba, y `./scripts/smoke.sh` con
   `exit=0`; después `docker compose -p clinicsay down -v`. Siguiente paso:
   revisar y mergear la PR.
+- 2026-11-24: en la misma PR #16, `docs/api.html`, una página estática que
+  muestra `openapi.yaml` con Redoc. Lee `../openapi.yaml` al abrirse, así que
+  no hay copia del contrato que se desincronice. Redoc 2.5.4 viene de jsDelivr
+  con la versión exacta y su hash SRI (el archivo del CDN es idéntico al del
+  paquete de npm); no se usa la 3.2.0 porque tiene menos de dos semanas y la
+  rama 3 es un major de octubre. Abierta con `file://`, donde `fetch` no lee
+  el contrato, explica cómo servirla; si Redoc o el contrato no cargan, lo
+  dice. README (apartado 1) y `AGENTS.md` (mapa y comandos) cuentan cómo
+  verla con `python3 -m http.server 8000 --bind 127.0.0.1`. Sin
+  dependencias, sin endpoints y sin cambios en `src/`.
+
+  Verificación: con ese servidor, Chrome sin interfaz (`--dump-dom` y
+  `--screenshot`) muestra las diez operaciones, el título y la descripción
+  del contrato, y el servidor registra la petición a `/openapi.yaml`. Con
+  `file://` aparece el aviso con el comando; con jsDelivr bloqueado
+  (`--host-resolver-rules`) o con el hash alterado en una copia temporal, el
+  aviso de que Redoc no cargó; con una copia temporal en una carpeta sin
+  `../openapi.yaml`, el 404 del contrato.

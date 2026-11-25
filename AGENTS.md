@@ -53,6 +53,7 @@ npm run test:e2e -- test/contract.e2e-spec.ts         # respuestas contra openap
 docker compose up --build -d --wait                   # api :3000, db, provider :4010
 scripts/smoke.sh        # recorrido completo contra el compose levantado
 docker compose down -v  # bajar el compose y borrar su base
+python3 -m http.server 8000 --bind 127.0.0.1   # docs/api.html en http://localhost:8000/docs/api.html
 ```
 
 - `verify` ejecuta `lint` (oxlint con reglas que usan los tipos), `typecheck`
@@ -115,6 +116,7 @@ docker compose down -v  # bajar el compose y borrar su base
 | Arranque con `docker compose up --build` (migraciones, `/health`, `CLOCK_MODE=test`, Postgres en `127.0.0.1:55432`) y recorrido completo: reloj → cita → pasada → mensaje exacto en el proveedor | `docker-compose.yml`, `Dockerfile`, `scripts/smoke.sh` | job `compose` del CI (`scripts/smoke.sh`) |
 | Contrato: cada operación y código de `openapi.yaml` con su esquema en modo estricto (sin propiedades de más salvo `virtual: true`, fechas como `toApiDate`), 4xx con exactamente `{ error }`, sin cuerpo donde no hay contenido, y cobertura de todas las respuestas documentadas | `openapi.yaml`, `test/support/contract.ts` (`expectContract`, `uncoveredResponses`, `EXTENSIONS`, `NO_CONTENT_BODIES`) | `test/contract.e2e-spec.ts`, `test/support/contract.spec.ts` |
 | Verificación completa para agentes (lint, tipos, unitarios, e2e y humo) | `.claude/skills/verificar/SKILL.md` | — |
+| Documentación navegable del contrato: Redoc 2.5.4 de jsDelivr (versión exacta y hash SRI) que lee `../openapi.yaml` al abrirse, sin copia; con `file://` o sin Redoc muestra un aviso | `docs/api.html` | — (se abre con `python3 -m http.server`) |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
 

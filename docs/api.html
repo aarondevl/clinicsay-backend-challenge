@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ClinicSay · Recordatorios de citas · API</title>
+    <!--
+      Muestra ../openapi.yaml con Redoc. No hay copia del contrato: la página
+      lo lee al abrirse, así que siempre enseña el que hay en el repo.
+      fetch no lee archivos con file://; para verla, desde la raíz del repo:
+        python3 -m http.server 8000 --bind 127.0.0.1
+      y abrir http://localhost:8000/docs/api.html (README, apartado 1).
+      Redoc viene de jsDelivr con la versión exacta y su hash (SRI): para
+      cambiar de versión hay que cambiar las dos cosas.
+    -->
+    <style>
+      body {
+        margin: 0;
+      }
+      .notice {
+        max-width: 42rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+      }
+      .notice code {
+        background: #f2f2f2;
+        padding: 0.1rem 0.3rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="needs-server" class="notice" hidden>
+      <h1>La documentación necesita un servidor</h1>
+      <p>
+        Esta página lee <code>openapi.yaml</code> con <code>fetch</code>, que no
+        funciona abriendo el archivo con <code>file://</code>. Desde la raíz del
+        repositorio:
+      </p>
+      <p><code>python3 -m http.server 8000 --bind 127.0.0.1</code></p>
+      <p>
+        y abre
+        <a href="http://localhost:8000/docs/api.html"
+          >http://localhost:8000/docs/api.html</a
+        >.
+      </p>
+    </div>
+    <div id="load-error" class="notice" hidden>
+      <h1>No se pudo mostrar la documentación</h1>
+      <p id="load-error-message"></p>
+    </div>
+    <div id="redoc"></div>
+
+    <script
+      src="https://cdn.jsdelivr.net/npm/redoc@2.5.4/bundles/redoc.standalone.js"
+      integrity="sha384-w447zOpYfw/1Tv/5AK9NfHTlQIqE3RVR6KY62jCyy9zNDgO64cMwGGP1Fj0zJVf5"
+      crossorigin="anonymous"
+    ></script>
+    <script>
+      function showError(message) {
+        document.getElementById('load-error-message').textContent = message;
+        document.getElementById('load-error').hidden = false;
+      }
+
+      if (location.protocol === 'file:') {
+        document.getElementById('needs-server').hidden = false;
+      } else if (typeof Redoc === 'undefined') {
+        showError(
+          'No se pudo cargar Redoc desde cdn.jsdelivr.net: sin conexión, o el archivo no coincide con su hash (integrity).',
+        );
+      } else {
+        // URL absoluta: así no depende de cómo resuelva Redoc una relativa.
+        const specUrl = new URL('../openapi.yaml', location.href).href;
+        Redoc.init(specUrl, {}, document.getElementById('redoc'), (error) => {
+          if (error) showError(`${specUrl}: ${error.message ?? error}`);
+        });
+      }
+    </script>
+  </body>
+</html>
