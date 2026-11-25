@@ -62,8 +62,10 @@ docker compose down -v  # bajar el compose y borrar su base
 - En un worktree, `export COMPOSE_PROJECT_NAME=clinicsay` (o
   `docker compose -p clinicsay ...`) antes de `npm run db:up` y del compose:
   sin eso el proyecto toma el nombre de la carpeta, y dos worktrees levantan
-  dos compose que chocan en los mismos puertos.
-- `scripts/smoke.sh` necesita bash y curl (sin jq). Usa el ejemplo del
+  dos compose que chocan en los mismos puertos. Como el proyecto es uno solo,
+  se verifica un worktree a la vez: el `up --build` de uno sustituye la api
+  del otro y `down -v` borra la base de sus e2e.
+- `scripts/smoke.sh` necesita bash, curl, grep y sed (sin jq). Usa el ejemplo del
   enunciado (cita el 28/03/2027 a las 10:00 de Madrid), comprueba
   `{"processed":1}`, el texto exacto y la `Idempotency-Key` en el proveedor y
   el recordatorio `sent`, y sale con 1 y un mensaje `smoke: FALLO: ...` si
@@ -153,7 +155,9 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 
 ## Invariantes
 
-Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
+Casi todos tienen un test que falla si un cambio los rompe. Los que dependen
+de la revisión (por ejemplo, que la hora solo salga de `Clock`) se cuentan en
+el apartado 3 del README; quien toque uno de ellos añade el test.
 
 - **Hora:** la hora de negocio sale siempre del puerto `Clock`. Nada de
   `new Date()` sin argumentos, `Date.now()` ni `now()` de Postgres en

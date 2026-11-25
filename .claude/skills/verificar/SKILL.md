@@ -8,6 +8,10 @@ description: Úsala antes de dar por terminado un cambio en este repositorio, an
 Un cambio está terminado cuando pasan los dos bloques de abajo y se ha
 mostrado su salida. «Debería pasar» no cuenta: se ejecuta y se lee.
 
+Todos los worktrees comparten el proyecto de compose `clinicsay` (los mismos
+puertos), así que se verifica uno a la vez: el `up --build` de uno sustituye
+la api del otro y `down -v` borra la base que usan sus e2e.
+
 ## 1. Lint, tipos, unitarios y e2e
 
 ```bash
