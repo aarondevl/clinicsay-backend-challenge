@@ -91,7 +91,7 @@ docker compose down -v  # bajar el compose y borrar su base
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
 | Pasada del job (bloqueo, orden de descartes, llamada, guardado, un recordatorio con error no frena a los demás) | `src/application/reminders/run-reminder-pass.ts`, puerto `Logger` en `src/infrastructure/logging/nest-logger.ts` | `test/reminder-job.e2e-spec.ts`, `nest-logger.spec.ts` |
-| Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
+| Llamada al proveedor (`Idempotency-Key`; con las cabeceras recibidas cuenta su código aunque falle el cuerpo; sin ellas, timeout → `timeout` y otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `http-message-provider.spec.ts`, `test/reminder-job.e2e-spec.ts` |
 | `POST /jobs/reminders/run` y cierre ordenado (el controlador registra la pasada con `track`, abortar y esperar a la pasada en `beforeApplicationShutdown`, `enableShutdownHooks` en `createApp`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts`, `src/app.factory.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
 | Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164; `messageId` y `from` con `IsStorableText`, `text` sin límite), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
 | Crear clínicas y pacientes (zona IANA → 400, `name` con `IsStorableText`, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
@@ -222,7 +222,11 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
   `no_phone`, `opted_out`. Ninguno llama al proveedor.
 - **Proveedor:** 202 o 200 (duplicado) → `sent`, igual que cualquier otro 2xx.
   Cualquier 4xx → `failed`, sin reintento. 5xx, error de red, más de 5000 ms,
-  1xx o 3xx → reintento. `attempts` cuenta las llamadas hechas al proveedor.
+  1xx o 3xx → reintento. Error de red y más de 5000 ms solo cuentan si no
+  llegaron las cabeceras: con ellas ya se sabe el código, y un fallo al leer
+  el cuerpo (conexión cortada o timeout) se registra sin cambiarlo. Si no,
+  un 422 con el cuerpo cortado se reintentaría y entregaría lo que el
+  operador rechazó. `attempts` cuenta las llamadas hechas al proveedor.
   `sentAt` y la hora desde la que cuenta el reintento son la del servicio
   después de la llamada; `too_late` se mira antes. `sendSeq` (secuencia
   `reminder_send_seq`) y `sentTo` solo se fijan al quedar `sent`.
@@ -262,14 +266,20 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
   real (`createApp`), Postgres real y el proveedor real.
 - El proveedor no se mockea. Los fallos se provocan con su API de
   administración (`POST /admin/rules` con `unavailable`, `lost-response` o
-  `reject`) y se comprueban con `GET /admin/requests`. Las dos excepciones:
+  `reject`) y se comprueban con `GET /admin/requests`. Las tres excepciones:
   el timeout se prueba con un `providerTimeoutMs` bajo en `startTestApp` y el
   proxy TCP (`test/support/tcp-proxy.ts`) con `dropResponses(true)`, que deja
-  llegar la petición y descarta la respuesta, y el error de red con un
+  llegar la petición y descarta la respuesta; el error de red, con un
   `providerUrl` a `startResetServer` (`test/support/reset-server.ts`), que
-  corta cada conexión al aceptarla. No vale un puerto recién liberado: otro
-  proceso puede ocuparlo y responder. La caída de la base se prueba poniendo
-  el proxy TCP entre la app y Postgres y cortándolo.
+  corta cada conexión al aceptarla; y el fallo al leer el cuerpo, con un
+  `providerUrl` a `startTruncatedBodyServer`
+  (`test/support/truncated-body-server.ts`), que responde el código de
+  `respondWith` con las cabeceras y un `content-length` mayor que lo que
+  envía, y después corta la conexión (`cut`) o la deja abierta hasta el
+  timeout (`stall`). Sus peticiones se miran con `requests()`, no con
+  `GET /admin/requests`. No vale un puerto recién liberado: otro proceso
+  puede ocuparlo y responder. La caída de la base se prueba poniendo el
+  proxy TCP entre la app y Postgres y cortándolo.
 - Un error inesperado dentro de una transacción se provoca con un dato que
   la API no acepta escrito por SQL directo, o con una subclase de
   `Transactions` que envuelve la de la app y falla donde hace falta (antes de

@@ -349,6 +349,15 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     Cualquier 4xx es `failed`, y lo demás (5xx, error de red, timeout, 1xx y
     3xx) se reintenta, que con la misma `Idempotency-Key` es seguro. El
     timeout (`AbortSignal.timeout`) cubre también la lectura del cuerpo;
+  - error de red y timeout solo cuentan antes de las cabeceras
+    (2026-11-24). En cuanto `fetch` resuelve, el resultado es el código: si
+    la conexión se corta o salta el timeout a mitad del cuerpo, se registra
+    y el código se mantiene. Antes el cuerpo se leía en el mismo `try`, y un
+    422 con el cuerpo cortado acababa como `network_error` y se reintentaba
+    al minuto, lo que podía entregar un mensaje que el operador había
+    rechazado; un 202 en el mismo caso gastaba un intento de más
+    (reproducido). La clasificación de `classifyProviderResult` no cambia:
+    cambia qué resultado le llega;
   - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
     fallidos y descartados;
   - un error inesperado dentro de la transacción de un recordatorio
