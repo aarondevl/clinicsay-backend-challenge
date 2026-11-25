@@ -25,6 +25,11 @@ import {
 import { holdLock } from './support/locks.js';
 import { type ResetServer, startResetServer } from './support/reset-server.js';
 import { startTcpProxy, type TcpProxy } from './support/tcp-proxy.js';
+import {
+  type BodyEnding,
+  startTruncatedBodyServer,
+  type TruncatedBodyServer,
+} from './support/truncated-body-server.js';
 
 // Hora del servicio al crear las citas.
 const NOW = '2027-03-01T00:00:00Z';
@@ -838,6 +843,94 @@ describe('job de envío', () => {
         sentAt: T_PLUS_1_MIN,
       });
     });
+  });
+
+  describe('respuesta con el código pero sin el cuerpo completo', () => {
+    let truncating: TruncatedBodyServer;
+    let truncated: TestApp;
+
+    beforeAll(async () => {
+      truncating = await startTruncatedBodyServer();
+      // Timeout bajo para que el cuerpo que no llega lo agote pronto.
+      truncated = await startTestApp({
+        providerUrl: `http://127.0.0.1:${truncating.port}`,
+        providerTimeoutMs: 300,
+      });
+    });
+
+    afterAll(async () => {
+      await truncated.close();
+      await truncating.close();
+    });
+
+    beforeEach(() => {
+      truncating.clear();
+    });
+
+    it.each<{
+      status: number;
+      ending: BodyEnding;
+      body: string;
+      expected: { status: string; sentAt: string | null };
+    }>([
+      {
+        status: 422,
+        ending: 'cut',
+        body: 'cortado',
+        expected: { status: 'failed', sentAt: null },
+      },
+      {
+        status: 422,
+        ending: 'stall',
+        body: 'que no llega a tiempo',
+        expected: { status: 'failed', sentAt: null },
+      },
+      {
+        status: 202,
+        ending: 'cut',
+        body: 'cortado',
+        expected: { status: 'sent', sentAt: T },
+      },
+      {
+        status: 202,
+        ending: 'stall',
+        body: 'que no llega a tiempo',
+        expected: { status: 'sent', sentAt: T },
+      },
+    ])(
+      '$status con el cuerpo $body cuenta el código: $expected.status con attempts 1 y sin más llamadas',
+      async ({ status, ending, expected }) => {
+        truncating.respondWith(status, ending);
+        await truncated.setClock(NOW);
+        const created = await madridAppointment({ app: truncated });
+        const reminderId = created.reminders[0]?.id;
+        const warnings = vi
+          .spyOn(Logger.prototype, 'warn')
+          .mockImplementation(() => undefined);
+        try {
+          await truncated.setClock(T);
+          expect(await runJob(truncated)).toEqual({ processed: 1 });
+          expect(await onlyReminder(created.id)).toMatchObject({
+            ...expected,
+            attempts: 1,
+          });
+          // El fallo al leer el cuerpo no se pierde: queda en el log.
+          expect(warnings).toHaveBeenCalledWith(
+            expect.stringContaining(`idempotency key ${reminderId}`),
+            expect.any(Error),
+          );
+
+          // Ni al minuto ni a los 6 minutos sale otra petición.
+          for (const later of [T_PLUS_1_MIN, T_PLUS_6_MIN]) {
+            await truncated.setClock(later);
+            expect(await runJob(truncated)).toEqual({ processed: 0 });
+          }
+          expect(truncating.requests()).toEqual([reminderId]);
+        } finally {
+          warnings.mockRestore();
+        }
+      },
+    );
   });
 
   describe('proveedor que no responde a tiempo', () => {
