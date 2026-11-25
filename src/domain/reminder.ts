@@ -1,5 +1,5 @@
 import type { SendOutcome } from './provider-outcome.js';
-import type { ReminderPlan } from './reminder-schedule.js';
+import { quietHoursEnd, type ReminderPlan } from './reminder-schedule.js';
 import { nextRetryAt } from './retry-policy.js';
 
 /** Estado de un recordatorio. Solo `pending` se puede enviar. */
@@ -103,6 +103,45 @@ export function skipReminder(reminder: Reminder, reason: SkipReason): Reminder {
     skipReason: reason,
     nextAttemptAt: null,
   };
+}
+
+/**
+ * Aplaza un recordatorio pendiente hasta `until` sin llamar al proveedor:
+ * sigue `pending` con los mismos `attempts` y `scheduledFor`, y solo cambia
+ * `nextAttemptAt`, como un reintento.
+ *
+ * @throws Error si no está `pending` (fallo de programación).
+ */
+export function postponeReminder(reminder: Reminder, until: Date): Reminder {
+  assertPending(reminder);
+  return { ...reminder, nextAttemptAt: until };
+}
+
+/**
+ * Aplica la franja de silencio al ir a enviar. Entre las 21:00 y las 09:00
+ * no se envía nada, salvo los reintentos, que no esperan a que acabe; así
+ * que solo mira el primer intento (`attempts` 0). Se evalúa después de los
+ * descartes de `skipReasonAtSendTime` y antes de llamar al proveedor.
+ *
+ * @param ctx.now Hora del servicio (puerto `Clock`).
+ * @param ctx.startsAt Inicio de la cita.
+ * @param ctx.timeZone Zona IANA efectiva de la cita (ver `effectiveTimeZone`).
+ * @returns El recordatorio aplazado a las 09:00 siguientes, o ya `skipped`
+ * con `too_late` si esa hora no queda antes del inicio de la cita (como al
+ * planificarlo), o `null` si se puede enviar ya.
+ * @throws Error si no está `pending` o si la zona no es válida (fallos de
+ * programación).
+ */
+export function holdForQuietHours(
+  reminder: Reminder,
+  ctx: { now: Date; startsAt: Date; timeZone: string },
+): Reminder | null {
+  if (reminder.attempts > 0) return null;
+  const end = quietHoursEnd(ctx.now, ctx.timeZone);
+  if (end === null) return null;
+  return end < ctx.startsAt
+    ? postponeReminder(reminder, end)
+    : skipReminder(reminder, 'too_late');
 }
 
 /**

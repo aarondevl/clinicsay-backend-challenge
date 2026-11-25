@@ -35,7 +35,7 @@ export function planReminder(input: {
   let candidate = localDateTime(startsAt, timeZone).minus({ days: 1 });
   if (candidate.toJSDate() < now) candidate = localDateTime(now, timeZone);
 
-  const scheduled = outOfQuietHours(candidate);
+  const scheduled = endOfQuietHours(candidate) ?? candidate;
   const scheduledFor = scheduled.toJSDate();
 
   return {
@@ -45,16 +45,29 @@ export function planReminder(input: {
 }
 
 /**
- * Si `local` cae en `[21:00, 09:00)`, la lleva a las 09:00 siguientes. Las
- * horas que no existen o se repiten por el cambio de horario (02:00-03:00)
- * caen dentro de la franja y acaban también a las 09:00.
+ * Dice si `instant` cae en la franja de silencio de `timeZone` y, si cae,
+ * cuándo termina: las 09:00 locales siguientes. El job lo usa al enviar,
+ * porque en la franja no se envía nada aunque el recordatorio ya toque.
+ *
+ * @param timeZone Zona IANA efectiva de la cita (ver `effectiveTimeZone`).
+ * @returns El fin de la franja, o `null` si `instant` queda fuera de ella.
+ * @throws Error si `timeZone` no es una zona IANA válida (el llamador la valida antes).
  */
-function outOfQuietHours(local: DateTime): DateTime {
+export function quietHoursEnd(instant: Date, timeZone: string): Date | null {
+  return endOfQuietHours(localDateTime(instant, timeZone))?.toJSDate() ?? null;
+}
+
+/**
+ * Si `local` cae en `[21:00, 09:00)`, devuelve las 09:00 siguientes; si no,
+ * `null`. Las horas que no existen o se repiten por el cambio de horario
+ * (02:00-03:00) caen dentro de la franja y acaban también a las 09:00.
+ */
+function endOfQuietHours(local: DateTime): DateTime | null {
   if (local.hour >= QUIET_HOURS.start) {
     return atQuietHoursEnd(local.plus({ days: 1 }));
   }
   if (local.hour < QUIET_HOURS.end) return atQuietHoursEnd(local);
-  return local;
+  return null;
 }
 
 function atQuietHoursEnd(day: DateTime): DateTime {
