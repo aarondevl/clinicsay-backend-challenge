@@ -1,4 +1,9 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { Logger } from '@nestjs/common';
+import { ServiceUnavailableError } from '../src/application/errors.js';
+import { Clock } from '../src/application/ports/clock.js';
+import { MessageProvider } from '../src/application/ports/message-provider.js';
+import type { Repositories } from '../src/application/ports/repositories.js';
 import { Transactions } from '../src/application/ports/transactions.js';
 import { RunReminderPass } from '../src/application/reminders/run-reminder-pass.js';
 import type { Reminder } from '../src/domain/reminder.js';
@@ -525,6 +530,49 @@ describe('job de envío', () => {
       }
     });
 
+    it('un error inesperado en un recordatorio no frena a los demás: sigue pending, sin contarse, y se registra con su id', async () => {
+      const broken = await madridAppointment();
+      const healthy = await madridAppointment({
+        patient: { name: 'Luis', phone: '+34600333444' },
+      });
+      // Una zona que la API nunca acepta: `buildReminderText` lanza al ir a
+      // enviarlo. Es el primero que toma la pasada (misma hora, id menor).
+      await t.orm.em
+        .getConnection()
+        .execute(`update clinic set timezone = 'Nope/Zone' where id = ?`, [
+          broken.clinicId,
+        ]);
+      const brokenId = broken.reminders[0]?.id;
+      const errors = vi
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        await t.setClock(T);
+        expect(await runJob()).toEqual({ processed: 1 });
+        expect(await onlyReminder(broken.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+        expect(await onlyReminder(healthy.id)).toMatchObject({
+          status: 'sent',
+        });
+        expect(errors).toHaveBeenCalledWith(
+          expect.stringContaining(`reminder ${brokenId}`),
+          expect.any(Error),
+        );
+
+        // La pasada siguiente lo vuelve a tomar primero y tampoco se queda en él.
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await onlyReminder(broken.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+        expect(await t.provider.requests()).toHaveLength(1);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
     it('con la señal abortada no toma ningún recordatorio', async () => {
       const created = await madridAppointment();
       await t.setClock(T);
@@ -535,6 +583,69 @@ describe('job de envío', () => {
         attempts: 0,
       });
       expect(await t.provider.requests()).toEqual([]);
+    });
+  });
+
+  describe('errores que cortan la pasada', () => {
+    /** La pasada de la app con otras transacciones y un registro de errores propio. */
+    function passWith(tx: Transactions, logger = { error: vi.fn() }) {
+      return new RunReminderPass(
+        tx,
+        t.app.get(Clock),
+        t.app.get(MessageProvider),
+        logger,
+      );
+    }
+
+    it('la base caída al confirmar un recordatorio corta la pasada (503) sin tomar el siguiente ni registrarlo como fallo suyo', async () => {
+      const first = await madridAppointment();
+      const second = await madridAppointment({
+        patient: { name: 'Luis', phone: '+34600333444' },
+      });
+      await t.setClock(T);
+      // Como si la conexión se cortara en el COMMIT: el proveedor ya lo recibió.
+      class CommitFails extends Transactions {
+        run<V>(work: (repos: Repositories) => Promise<V>): Promise<V> {
+          return transactions.run(async (repos) => {
+            await work(repos);
+            throw new ServiceUnavailableError('database unavailable');
+          });
+        }
+      }
+      const logger = { error: vi.fn() };
+      await expect(
+        passWith(new CommitFails(), logger).execute(),
+      ).rejects.toBeInstanceOf(ServiceUnavailableError);
+      expect(await t.provider.requests()).toHaveLength(1);
+      expect(logger.error).not.toHaveBeenCalled();
+      for (const appointment of [first, second]) {
+        expect(await onlyReminder(appointment.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+      }
+    });
+
+    it('un error antes de tomar ningún recordatorio corta la pasada en vez de repetirse sin fin', async () => {
+      await madridAppointment();
+      await t.setClock(T);
+      const boom = new Error('lockNextDue failed');
+      class LockFails extends Transactions {
+        run<V>(): Promise<V> {
+          return transactions.run(async () => {
+            throw boom;
+          });
+        }
+      }
+      // Si la pasada no se corta, la señal la para al acabar el test.
+      const stop = new AbortController();
+      try {
+        await expect(
+          within(2000, passWith(new LockFails()).execute(stop.signal)),
+        ).rejects.toBe(boom);
+      } finally {
+        stop.abort();
+      }
     });
   });
 

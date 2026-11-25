@@ -23,6 +23,7 @@ import { WebhooksController } from './http/webhooks.controller.js';
 import { SystemClock } from './infrastructure/clock/system-clock.js';
 import { TestClock } from './infrastructure/clock/test-clock.js';
 import { UuidV7IdGenerator } from './infrastructure/ids/uuid-v7-id-generator.js';
+import { NestLogger } from './infrastructure/logging/nest-logger.js';
 import { MikroOrmTransactions } from './infrastructure/persistence/mikro-orm-transactions.js';
 import { PersistenceModule } from './infrastructure/persistence/persistence.module.js';
 import { HttpMessageProvider } from './infrastructure/provider/http-message-provider.js';
@@ -89,7 +90,13 @@ const useCaseProviders: Provider[] = [
       transactions: Transactions,
       clock: Clock,
       provider: MessageProvider,
-    ) => new RunReminderPass(transactions, clock, provider),
+    ) =>
+      new RunReminderPass(
+        transactions,
+        clock,
+        provider,
+        new NestLogger(RunReminderPass.name),
+      ),
     inject: [Transactions, Clock, MessageProvider],
   },
   {
