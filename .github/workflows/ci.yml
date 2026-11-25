@@ -54,6 +54,8 @@ jobs:
       - run: docker compose up --build -d --wait --wait-timeout 180
       - name: GET /health responde 200
         run: test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/health)" = 200
+      - name: Prueba de humo (reloj, cita, pasada y mensaje en el proveedor)
+        run: ./scripts/smoke.sh
       - name: Logs del compose
         if: failure()
         run: docker compose logs
