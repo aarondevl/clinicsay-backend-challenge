@@ -7,6 +7,7 @@ import type { Repositories } from '../src/application/ports/repositories.js';
 import { Transactions } from '../src/application/ports/transactions.js';
 import { RunReminderPass } from '../src/application/reminders/run-reminder-pass.js';
 import type { Reminder } from '../src/domain/reminder.js';
+import { ShutdownCoordinator } from '../src/http/shutdown-coordinator.js';
 import {
   startTestApp,
   TEST_PROVIDER_PORT,
@@ -764,9 +765,10 @@ describe('job de envío', () => {
   describe('cierre ordenado', () => {
     const OTHER_PHONE = '+34600333444';
 
-    // Que el cierre espere a la pasada lo prueba shutdown-coordinator.spec.ts:
-    // aquí no se ve, porque `server.close()` espera a la petición en curso y
-    // el pool de `pg` espera a que la transacción suelte su conexión.
+    // Con `close()` no se ve que el cierre espere a la pasada, porque
+    // `server.close()` espera a la petición en curso y el pool de `pg` a que
+    // la transacción suelte su conexión. Por eso el segundo test llama al
+    // coordinador directamente.
     it('al cerrar la app, la pasada en curso termina su recordatorio y no toma más', async () => {
       // El proveedor recibe las peticiones pero no responde: la pasada se
       // queda esperando 1 s con el primer recordatorio.
@@ -814,6 +816,51 @@ describe('job de envío', () => {
         attempts: 0,
       });
       expect(await t.provider.requests(OTHER_PHONE)).toEqual([]);
+    });
+
+    it('el coordinador espera a la pasada que lanzó el controlador antes de dejar cerrar', async () => {
+      // Sin cerrar el servidor HTTP ni la base, lo único que puede hacer
+      // esperar al coordinador es que el controlador le registrara la pasada.
+      const proxy = await startTcpProxy('127.0.0.1', TEST_PROVIDER_PORT);
+      const waiting = await startTestApp({
+        providerUrl: `http://127.0.0.1:${proxy.port}`,
+        providerTimeoutMs: 1000,
+      });
+      try {
+        await waiting.setClock(NOW);
+        const created = await madridAppointment({ app: waiting });
+        await waiting.setClock(T);
+        proxy.dropResponses(true);
+
+        const running = waiting.http
+          .post('/jobs/reminders/run')
+          .then((res) => res);
+        await until(async () => (await t.provider.requests(PHONE)).length > 0);
+        await waiting.app.get(ShutdownCoordinator).beforeApplicationShutdown();
+        // Sin esperar, la pasada seguiría con el proveedor y el intento sin
+        // confirmar (attempts 0).
+        expect(await onlyReminder(created.id)).toMatchObject({
+          status: 'pending',
+          attempts: 1,
+        });
+        const res = await running;
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ processed: 1 });
+      } finally {
+        await waiting.close();
+        await proxy.close();
+      }
+    });
+
+    it('createApp escucha SIGTERM para cerrar la app, y close() deja de escucharlo', async () => {
+      const before = process.listenerCount('SIGTERM');
+      const started = await startTestApp();
+      try {
+        expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+      } finally {
+        await started.close();
+      }
+      expect(process.listenerCount('SIGTERM')).toBe(before);
     });
   });
 });
