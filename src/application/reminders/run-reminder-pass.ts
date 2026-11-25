@@ -1,5 +1,6 @@
 import { classifyProviderResult } from '../../domain/provider-outcome.js';
 import {
+  holdForQuietHours,
   recordAttempt,
   skipReasonAtSendTime,
   skipReminder,
@@ -15,9 +16,18 @@ import type { Transactions } from '../ports/transactions.js';
 
 /** Resultado de una pasada del job. */
 export type ReminderPassResult = {
-  /** Recordatorios que trató esta pasada: enviados, reintentados, fallidos o descartados. */
+  /**
+   * Recordatorios que trató esta pasada: enviados, reintentados, fallidos o
+   * descartados. Uno aplazado por la franja de silencio no cuenta.
+   */
   processed: number;
 };
+
+/**
+ * Qué pasó con el siguiente recordatorio: no quedaba ninguno, se trató
+ * (cuenta en `processed`) o se aplazó por la franja de silencio (no cuenta).
+ */
+type NextOutcome = 'none' | 'processed' | 'postponed';
 
 /**
  * Caso de uso: una pasada del job de envío. Trata, uno a uno y de todas las
@@ -35,9 +45,10 @@ export class RunReminderPass {
   /**
    * Trata recordatorios hasta que no quede ninguno que toque o se aborte
    * `signal`. Cada uno va en su propia transacción: se bloquea, se vuelven a
-   * comprobar los descartes con la hora del servicio, se llama al proveedor
-   * con `Idempotency-Key` = id del recordatorio y se guarda el resultado
-   * antes del `COMMIT`.
+   * comprobar los descartes con la hora del servicio, se aplaza a las 09:00
+   * un primer intento que toca dentro de la franja de silencio, se llama al
+   * proveedor con `Idempotency-Key` = id del recordatorio y se guarda el
+   * resultado antes del `COMMIT`.
    *
    * Si un recordatorio lanza cualquier otro error, su transacción se deshace,
    * se registra con su id y la pasada sigue con los demás. No cuenta en
@@ -57,11 +68,11 @@ export class RunReminderPass {
     while (!signal?.aborted) {
       const before = taken.length;
       try {
-        const found = await this.transactions.run((repos) =>
+        const outcome = await this.transactions.run((repos) =>
           this.handleNext(repos, taken),
         );
-        if (!found) break;
-        processed++;
+        if (outcome === 'none') break;
+        if (outcome === 'processed') processed++;
       } catch (error) {
         // `handleNext` apunta el id en cuanto lo bloquea, así que sigue ahí
         // aunque la transacción se haya deshecho.
@@ -88,14 +99,14 @@ export class RunReminderPass {
 
   /**
    * Trata el siguiente recordatorio que toca y apunta su id en `taken` en
-   * cuanto lo bloquea. Devuelve `false` si no queda ninguno.
+   * cuanto lo bloquea.
    */
   private async handleNext(
     repos: Repositories,
     taken: string[],
-  ): Promise<boolean> {
+  ): Promise<NextOutcome> {
     const reminder = await repos.reminders.lockNextDue(this.clock.now(), taken);
-    if (!reminder) return false;
+    if (!reminder) return 'none';
     taken.push(reminder.id);
 
     // La cita se lee sin bloquearla. Con el recordatorio bloqueado, esperar
@@ -120,9 +131,10 @@ export class RunReminderPass {
     }
 
     // Se comprueba en cada intento: la cita puede empezar entre dos.
+    const now = this.clock.now();
     const reason = skipReasonAtSendTime({
       startsAt: appointment.startsAt,
-      now: this.clock.now(),
+      now,
       phone: patient.phone,
       acceptsReminders: patient.acceptsReminders,
     });
@@ -132,7 +144,21 @@ export class RunReminderPass {
       await repos.reminders.update(
         skipReminder(reminder, reason ?? 'no_phone'),
       );
-      return true;
+      return 'processed';
+    }
+
+    // Un primer intento que el job toma ya dentro de la franja (cron
+    // atrasado, cola acumulada) no sale hasta las 09:00. El aplazado no
+    // cuenta en `processed`: ni se envió, ni se reintentó, ni se descartó.
+    const timeZone = effectiveTimeZone(clinic.timezone, appointment.virtual);
+    const held = holdForQuietHours(reminder, {
+      now,
+      startsAt: appointment.startsAt,
+      timeZone,
+    });
+    if (held !== null) {
+      await repos.reminders.update(held);
+      return held.status === 'pending' ? 'postponed' : 'processed';
     }
 
     const result = await this.provider.send({
@@ -142,7 +168,7 @@ export class RunReminderPass {
         patientName: patient.name,
         clinicName: clinic.name,
         startsAt: appointment.startsAt,
-        timeZone: effectiveTimeZone(clinic.timezone, appointment.virtual),
+        timeZone,
       }),
     });
     const outcome = classifyProviderResult(result);
@@ -153,6 +179,6 @@ export class RunReminderPass {
     await repos.reminders.update(
       recordAttempt(reminder, outcome, { now: this.clock.now(), to, sendSeq }),
     );
-    return true;
+    return 'processed';
   }
 }

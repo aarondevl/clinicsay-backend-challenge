@@ -500,6 +500,152 @@ describe('job de envío', () => {
       expect(await t.provider.requests(PHONE)).toHaveLength(1);
     });
 
+    describe('franja de silencio al enviar', () => {
+      it('un primer intento que la pasada toma a las 21:00 no se envía: sigue pending y sale a las 09:00 siguientes', async () => {
+        // 20:59:30 de Madrid (CET): el envío del día anterior ya pasó y queda
+        // para ahora, todavía fuera de la franja.
+        await t.setClock('2027-03-10T19:59:30Z');
+        const created = await madridAppointment({
+          startsAt: '2027-03-11T09:00:00Z',
+        });
+        expect(created.reminders[0]).toMatchObject({
+          scheduledFor: '2027-03-10T19:59:30Z',
+          status: 'pending',
+        });
+
+        // 21:00 en punto ya es franja: no se llama ni cuenta en `processed`.
+        await t.setClock('2027-03-10T20:00:00Z');
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await onlyReminder(created.id)).toMatchObject({
+          scheduledFor: '2027-03-10T19:59:30Z',
+          status: 'pending',
+          attempts: 0,
+          sentAt: null,
+        });
+        expect(await t.provider.requests()).toEqual([]);
+
+        await t.setClock('2027-03-11T07:59:59Z');
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await t.provider.requests()).toEqual([]);
+
+        // 09:00 de Madrid.
+        await t.setClock('2027-03-11T08:00:00Z');
+        expect(await runJob()).toEqual({ processed: 1 });
+        const reminder = await onlyReminder(created.id);
+        expect(reminder).toEqual({
+          id: created.reminders[0]?.id,
+          // Como en un reintento, se mueve el próximo intento y no la hora prevista.
+          scheduledFor: '2027-03-10T19:59:30Z',
+          status: 'sent',
+          attempts: 1,
+          sentAt: '2027-03-11T08:00:00Z',
+          skipReason: null,
+        });
+        expect(await t.provider.requests(PHONE)).toEqual([
+          { idempotencyKey: reminder.id, status: 202 },
+        ]);
+      });
+
+      it('un recordatorio acumulado que la pasada toma a las 23:00 espera a las 09:00 siguientes', async () => {
+        const created = await madridAppointment();
+        // 23:00 de Madrid (CET) del día del envío previsto (T, a las 10:00).
+        await t.setClock('2027-03-27T22:00:00Z');
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await onlyReminder(created.id)).toMatchObject({
+          scheduledFor: T,
+          status: 'pending',
+          attempts: 0,
+        });
+
+        // Las 09:00 siguientes ya son de horario de verano (CEST): 07:00 UTC.
+        await t.setClock('2027-03-28T06:59:59Z');
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await t.provider.requests()).toEqual([]);
+
+        await t.setClock('2027-03-28T07:00:00Z');
+        expect(await runJob()).toEqual({ processed: 1 });
+        const reminder = await onlyReminder(created.id);
+        expect(reminder).toMatchObject({
+          scheduledFor: T,
+          status: 'sent',
+          attempts: 1,
+          sentAt: '2027-03-28T07:00:00Z',
+        });
+        expect(await t.provider.messages(PHONE)).toEqual([
+          { text: MADRID_TEXT, idempotencyKey: reminder.id },
+        ]);
+      });
+
+      it('si las 09:00 siguientes no quedan antes de la cita → skipped too_late, sin llamar al proveedor', async () => {
+        // Cita a las 09:00 de Madrid; envío previsto el día anterior a las 09:00.
+        const created = await madridAppointment({
+          startsAt: '2027-03-11T08:00:00Z',
+        });
+        // 23:00 de Madrid: la siguiente apertura es la hora de la cita.
+        await t.setClock('2027-03-10T22:00:00Z');
+        expect(await runJob()).toEqual({ processed: 1 });
+        expect(await onlyReminder(created.id)).toMatchObject({
+          scheduledFor: '2027-03-10T08:00:00Z',
+          status: 'skipped',
+          skipReason: 'too_late',
+          attempts: 0,
+          sentAt: null,
+        });
+        expect(await t.provider.requests()).toEqual([]);
+      });
+
+      it('una cita virtual de una clínica de Canarias usa la franja de Madrid', async () => {
+        const clinic = await createClinic(t, { timezone: 'Atlantic/Canary' });
+        const patient = await createPatient(t, clinic.id);
+        const created = await createAppointment(
+          t,
+          clinic.id,
+          patient.id,
+          STARTS_AT,
+          { virtual: true },
+        );
+        // 21:30 de Madrid (franja) y 20:30 de Canarias (fuera de ella).
+        await t.setClock('2027-03-27T20:30:00Z');
+        expect(await runJob()).toEqual({ processed: 0 });
+        expect(await onlyReminder(created.id)).toMatchObject({
+          status: 'pending',
+          attempts: 0,
+        });
+        expect(await t.provider.requests()).toEqual([]);
+
+        // 09:00 de Madrid (CEST).
+        await t.setClock('2027-03-28T07:00:00Z');
+        expect(await runJob()).toEqual({ processed: 1 });
+        expect(await onlyReminder(created.id)).toMatchObject({
+          status: 'sent',
+          sentAt: '2027-03-28T07:00:00Z',
+        });
+      });
+
+      it('un reintento dentro de la franja sí se envía: no espera a las 09:00', async () => {
+        await t.setClock('2027-03-10T19:59:30Z');
+        const created = await madridAppointment({
+          startsAt: '2027-03-11T09:00:00Z',
+        });
+        await t.provider.rule(PHONE, 'unavailable', 1);
+        expect(await runJob()).toEqual({ processed: 1 });
+
+        // 21:00:30 de Madrid: el reintento, un minuto después del 503.
+        await t.setClock('2027-03-10T20:00:30Z');
+        expect(await runJob()).toEqual({ processed: 1 });
+        const reminder = await onlyReminder(created.id);
+        expect(reminder).toMatchObject({
+          status: 'sent',
+          attempts: 2,
+          sentAt: '2027-03-10T20:00:30Z',
+        });
+        expect(await t.provider.requests(PHONE)).toEqual([
+          { idempotencyKey: reminder.id, status: 503 },
+          { idempotencyKey: reminder.id, status: 202 },
+        ]);
+      });
+    });
+
     it('5 pasadas concurrentes envían 10 recordatorios una sola vez', async () => {
       const clinic = await createClinic(t);
       const phones = Array.from({ length: 10 }, (_, i) => `+3460000000${i}`);

@@ -1,6 +1,8 @@
 import {
   cancelReminder,
+  holdForQuietHours,
   newReminder,
+  postponeReminder,
   recordAttempt,
   type Reminder,
   skipReasonAtSendTime,
@@ -208,6 +210,98 @@ describe('envío de un recordatorio', () => {
       expect(() =>
         skipReminder(pending({ status: 'sent' }), 'opted_out'),
       ).toThrow(Error);
+    });
+  });
+
+  describe('postponeReminder', () => {
+    it('sigue pending con sus intentos y su hora prevista; solo mueve el próximo intento', () => {
+      const until = new Date('2027-03-28T07:00:00Z');
+      expect(postponeReminder(pending(), until)).toEqual({
+        ...pending(),
+        nextAttemptAt: until,
+      });
+    });
+
+    it('no modifica el recordatorio recibido', () => {
+      const original = pending();
+      postponeReminder(original, new Date('2027-03-28T07:00:00Z'));
+      expect(original).toEqual(pending());
+    });
+
+    it('uno que no está pendiente es un fallo de programación', () => {
+      expect(() =>
+        postponeReminder(
+          pending({ status: 'skipped' }),
+          new Date('2027-03-28T07:00:00Z'),
+        ),
+      ).toThrow(Error);
+    });
+  });
+
+  describe('holdForQuietHours', () => {
+    // Cita a las 10:00 de Madrid (CET) del 11 de marzo.
+    const startsAt = new Date('2027-03-11T09:00:00Z');
+    const timeZone = 'Europe/Madrid';
+    // 09:00 de Madrid del 11 de marzo: la apertura tras una noche de franja.
+    const opening = new Date('2027-03-11T08:00:00Z');
+
+    it('un primer intento fuera de la franja se envía ya', () => {
+      const now = new Date('2027-03-10T19:59:59Z');
+      expect(holdForQuietHours(pending(), { now, startsAt, timeZone })).toBe(
+        null,
+      );
+    });
+
+    it('un primer intento a las 21:00 se aplaza a las 09:00 siguientes sin tocar scheduledFor ni attempts', () => {
+      const now = new Date('2027-03-10T20:00:00Z');
+      expect(holdForQuietHours(pending(), { now, startsAt, timeZone })).toEqual(
+        { ...pending(), nextAttemptAt: opening },
+      );
+    });
+
+    it('si la apertura es la hora de la cita queda skipped too_late, con attempts 0', () => {
+      const now = new Date('2027-03-10T22:00:00Z');
+      expect(
+        holdForQuietHours(pending(), { now, startsAt: opening, timeZone }),
+      ).toEqual({
+        ...pending(),
+        status: 'skipped',
+        skipReason: 'too_late',
+        nextAttemptAt: null,
+      });
+    });
+
+    it('si la apertura cae después de la cita también es too_late', () => {
+      const now = new Date('2027-03-10T22:00:00Z');
+      expect(
+        holdForQuietHours(pending(), {
+          now,
+          startsAt: new Date('2027-03-11T07:30:00Z'),
+          timeZone,
+        }),
+      ).toMatchObject({ status: 'skipped', skipReason: 'too_late' });
+    });
+
+    it('un reintento dentro de la franja no espera', () => {
+      const now = new Date('2027-03-10T20:00:30Z');
+      expect(
+        holdForQuietHours(pending({ attempts: 1, nextAttemptAt: now }), {
+          now,
+          startsAt,
+          timeZone,
+        }),
+      ).toBe(null);
+    });
+
+    it('usa la zona que recibe: 20:30 de Canarias no es franja', () => {
+      const now = new Date('2027-03-10T20:30:00Z');
+      expect(
+        holdForQuietHours(pending(), {
+          now,
+          startsAt,
+          timeZone: 'Atlantic/Canary',
+        }),
+      ).toBe(null);
     });
   });
 
