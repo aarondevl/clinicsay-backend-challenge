@@ -1765,3 +1765,84 @@ Rama `docs/entrega`.
   de la api el id del recordatorio junto a `invalid time zone: Nope/Zone`.
   `scripts/smoke.sh` llega con la tarea 9. Siguiente paso: revisar y mergear
   la PR.
+- 2026-11-24: tarea 9 (entrega) en `docs/entrega`, PR
+  [#13](https://github.com/aarondevl/clinicsay-backend-challenge/pull/13).
+  Entran `scripts/smoke.sh` y su paso en el job `compose` del CI (tras el
+  `/health`), el README de entrega con los cinco apartados del enunciado, la
+  skill `.claude/skills/verificar` y la versión final de `AGENTS.md` (humo y
+  skill en el mapa y los comandos, los dos jobs del CI, la frase de las skills
+  de la plantilla) y `CLAUDE.md`. Sin cambios en `src/`, sin migraciones ni
+  dependencias nuevas. Cambios respecto al plan:
+  - `smoke.sh` es bash y no sh: `dash` no admite `pipefail` y `node:24-alpine`
+    no trae bash ni curl. Usa solo bash, curl, grep y sed, todos en
+    `ubuntu-latest`. Comprueba además la hora de envío, la `Idempotency-Key`
+    = id del recordatorio y el recordatorio `sent`;
+  - para poder repetirlo sobre la misma base vacía el proveedor, usa un
+    teléfono al azar y lanza una pasada previa a la hora de envío; sin ella,
+    un pendiente que dejó otra prueba daba `{"processed":2}` (reproducido). El
+    `+` del teléfono va como `%2B` en la query del proveedor, que la lee con
+    `URLSearchParams`;
+  - el compose se levanta con el proyecto `clinicsay` (`-p` o
+    `COMPOSE_PROJECT_NAME`), y `AGENTS.md` y la skill explican por qué en un
+    worktree y que se verifica uno a la vez;
+  - el README deja fuera el enlace al formulario y el plazo de la plantilla
+    de partida, y conserva «Reglas de código» y el enlace al enunciado;
+  - el mapa de `AGENTS.md` gana dos filas: arranque y humo, y la skill;
+  - la PR no se mergea: queda para revisión.
+
+  El humo pasa contra `main` desde el principio, así que se vio fallar con
+  tres mutaciones de la app, cada una con su `--build` (texto sin el punto
+  final, `processed += 2` e `Idempotency-Key` = id de la cita), y con el
+  script sin la pasada previa: `exit=1` y su mensaje las cuatro veces.
+
+  La revisión final de la rama no encontró nada crítico. Se arregló en la
+  misma rama: el README decía que un reintento que cae en el año 10000 da
+  500, pero desde #12 la pasada lo registra y sigue (reproducido: 200
+  `{"processed":0}`, `pending` con `attempts` 0, un 503 por pasada y
+  `22009` en el log); «lo que se corrigió de la IA» atribuía a la IA dos
+  bloqueos que el plan ya pedía, y ahora cuenta los tests y la regla que
+  faltaban; y precisiones de texto en el README, `AGENTS.md` y la skill.
+
+  Flujo con el que se hizo todo (README, apartado 5): una sesión
+  coordinadora reparte cada tarea a una sesión trabajadora con su worktree y
+  su PR; cada PR se revisa contra el plan, `AGENTS.md` y el Review Focus; la
+  revisión de todo `main` previa a esta tarea, hecha con otro modelo, dio
+  lugar a #11 y #12. PR de la entrega:
+  [#1](https://github.com/aarondevl/clinicsay-backend-challenge/pull/1)
+  andamiaje,
+  [#2](https://github.com/aarondevl/clinicsay-backend-challenge/pull/2)
+  reglas de código,
+  [#3](https://github.com/aarondevl/clinicsay-backend-challenge/pull/3) hora
+  de envío y texto,
+  [#4](https://github.com/aarondevl/clinicsay-backend-challenge/pull/4) el
+  dominio no lanza errores de `application`,
+  [#5](https://github.com/aarondevl/clinicsay-backend-challenge/pull/5)
+  persistencia,
+  [#6](https://github.com/aarondevl/clinicsay-backend-challenge/pull/6)
+  clínicas y pacientes,
+  [#7](https://github.com/aarondevl/clinicsay-backend-challenge/pull/7)
+  citas,
+  [#8](https://github.com/aarondevl/clinicsay-backend-challenge/pull/8)
+  reprogramar y cancelar,
+  [#9](https://github.com/aarondevl/clinicsay-backend-challenge/pull/9) job
+  de envío,
+  [#10](https://github.com/aarondevl/clinicsay-backend-challenge/pull/10)
+  webhook,
+  [#11](https://github.com/aarondevl/clinicsay-backend-challenge/pull/11)
+  validar entradas,
+  [#12](https://github.com/aarondevl/clinicsay-backend-challenge/pull/12)
+  aislar un recordatorio con error y
+  [#13](https://github.com/aarondevl/clinicsay-backend-challenge/pull/13)
+  entrega.
+
+  Queda fuera lo que lista el README en su apartado 3 (comportamientos
+  conocidos, tests y producto), que recoge lo pendiente de estas entradas y
+  de la revisión de `main`.
+
+  Verificación: desde una base vacía, `docker compose -p clinicsay up
+  --build -d --wait` con los tres servicios sanos, `npm run verify` en verde
+  (19 archivos y 212 unitarios, 8 archivos y 185 e2e) y
+  `./scripts/smoke.sh` con `exit=0`; después `docker compose -p clinicsay
+  down -v`. Siguiente paso: revisar y mergear la PR #13 con `checks` y
+  `compose` en verde antes del cierre (25-11-2026, 17:30 de Madrid). No
+  queda otra tarea del plan.
