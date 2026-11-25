@@ -452,6 +452,11 @@ describe('reprogramar y cancelar', () => {
       ['startsAt a null', { startsAt: null }],
       ['startsAt como número', { startsAt: 1806307200000 }],
       ['startsAt sin fecha', { startsAt: '10:00:00Z' }],
+      // Postgres lee el `+010000-…` de `toISOString()` como un offset: 500.
+      [
+        'startsAt que en UTC pasa al año 10000',
+        { startsAt: '9999-12-31T23:30:00-01:00' },
+      ],
     ])('con %s responde 400 { error }', async (_label, body) => {
       const created = await madridAppointment();
       const res = await patch(created.id, body);

@@ -53,10 +53,28 @@ describe('clínicas y pacientes', () => {
       ['con name vacío', { name: '', timezone: 'Europe/Madrid' }],
       ['con name que no es texto', { name: 7, timezone: 'Europe/Madrid' }],
       ['sin timezone', { name: 'Clínica' }],
+      // Postgres no admite NUL en `text`: daba 500.
+      [
+        'con name con NUL',
+        { name: 'Clínica\u0000', timezone: 'Europe/Madrid' },
+      ],
+      [
+        'con name de más de 200 caracteres',
+        { name: 'a'.repeat(201), timezone: 'Europe/Madrid' },
+      ],
     ])('%s responde 400 { error }', async (_label, body) => {
       const res = await t.http.post('/clinics').send(body);
       expect(res.status).toBe(400);
       expect(Object.keys(res.body)).toEqual(['error']);
+    });
+
+    it('acepta un name de 200 caracteres', async () => {
+      const name = 'a'.repeat(200);
+      const res = await t.http
+        .post('/clinics')
+        .send({ name, timezone: 'Europe/Madrid' });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ name });
     });
 
     it('con JSON mal formado responde 400 { error }', async () => {
@@ -139,6 +157,9 @@ describe('clínicas y pacientes', () => {
       ['acceptsReminders como texto', { acceptsReminders: 'true' }],
       ['acceptsReminders ausente', { acceptsReminders: undefined }],
       ['un name vacío', { name: '' }],
+      // Postgres no admite NUL en `text`: daba 500.
+      ['un name con NUL', { name: 'Ana\u0000' }],
+      ['un name de más de 200 caracteres', { name: 'a'.repeat(201) }],
       ['un clinicId que no es texto', { clinicId: 7 }],
     ])('con %s responde 400 { error }', async (_label, over) => {
       const clinic = await createClinic(t);
