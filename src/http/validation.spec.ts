@@ -2,6 +2,7 @@ import { validateSync } from 'class-validator';
 import {
   IsIsoDateTimeWithZone,
   isIsoDateTimeWithZone,
+  IsStorableText,
   parseIsoDateTimeWithZone,
 } from './validation.js';
 
@@ -123,5 +124,28 @@ describe('IsIsoDateTimeWithZone', () => {
     expect(errorsOf(IsIsoDateTimeWithZone(), '0000-01-01T00:00:00Z')).toEqual([
       'value must be between the years 0001 and 9999 in UTC',
     ]);
+  });
+});
+
+describe('IsStorableText', () => {
+  it('acepta un texto de hasta maxLength caracteres', () => {
+    expect(errorsOf(IsStorableText(3), 'abc')).toEqual([]);
+  });
+
+  // Postgres no admite NUL en `text`: la consulta fallaba con 08P01 (500).
+  it('rechaza un texto con el carácter NUL', () => {
+    expect(errorsOf(IsStorableText(3), 'a\u0000b')).toEqual([
+      'value must not contain NUL characters',
+    ]);
+  });
+
+  it('rechaza un texto de más de maxLength caracteres', () => {
+    expect(errorsOf(IsStorableText(3), 'abcd')).toEqual([
+      'value must be shorter than or equal to 3 characters',
+    ]);
+  });
+
+  it('rechaza lo que no es texto', () => {
+    expect(errorsOf(IsStorableText(3), 7)).toContain('value must be a string');
   });
 });

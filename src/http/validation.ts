@@ -1,5 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import {
+  IsString,
+  MaxLength,
   ValidateBy,
   type ValidationError as ClassValidatorError,
   type ValidationOptions,
@@ -82,6 +84,62 @@ export function IsIsoDateTimeWithZone(
     },
     options,
   );
+}
+
+/**
+ * Longitud máxima de los textos de entrada que llegan a Postgres. El contrato
+ * no fija ninguna; son holgadas para cualquier dato real.
+ */
+export const MAX_TEXT_LENGTH = {
+  /** Nombre de clínica o paciente: se guarda y va en el texto del recordatorio. */
+  name: 200,
+  /** `from` del webhook: un E.164 tiene 16 caracteres como mucho. */
+  phone: 200,
+  /**
+   * `messageId` del webhook: es la clave primaria de `inbound_message` y una
+   * clave btree no pasa de 2704 bytes. Tal como cuenta `@MaxLength`, un
+   * carácter ocupa como mucho 7 bytes en UTF-8 (emoji y selector de variante),
+   * así que 255 caracteres son unos 1,8 kB.
+   */
+  messageId: 255,
+} as const;
+
+// Postgres no admite el carácter NUL en `text`: rechaza la consulta entera
+// con 08P01.
+const NUL = '\u0000';
+
+/**
+ * Decorador de DTO para un texto que se guarda o se consulta en Postgres:
+ * cadena (`@IsString()`) de `maxLength` caracteres como mucho
+ * (`@MaxLength()`) y sin el carácter NUL. Sin él, Postgres rechazaba el valor
+ * y la API respondía 500 en vez de 400.
+ *
+ * @param maxLength Uno de los valores de {@link MAX_TEXT_LENGTH}.
+ */
+export function IsStorableText(
+  maxLength: number,
+  options?: ValidationOptions,
+): PropertyDecorator {
+  const decorators = [
+    IsString(options),
+    MaxLength(maxLength, options),
+    ValidateBy(
+      {
+        name: 'hasNoNul',
+        validator: {
+          // Lo que no es texto ya lo señala `@IsString()`.
+          validate: (value: unknown) =>
+            typeof value !== 'string' || !value.includes(NUL),
+          defaultMessage: (args) =>
+            `${args?.property ?? 'value'} must not contain NUL characters`,
+        },
+      },
+      options,
+    ),
+  ];
+  return (target, propertyKey) => {
+    for (const decorate of decorators) decorate(target, propertyKey);
+  };
 }
 
 function messages(errors: ClassValidatorError[]): string[] {
