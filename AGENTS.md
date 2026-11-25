@@ -24,7 +24,8 @@ un proveedor de mensajes y un webhook recibe las respuestas SI/NO.
    verlo fallar (`npx vitest run <archivo>`).
 3. Implementar en la capa que corresponde. La regla va en `src/domain`; el
    controlador no decide nada.
-4. Ver pasar ese test y después `npm run verify`.
+4. Ver pasar ese test y después `npm run verify`. Antes de una PR, también
+   el compose y `scripts/smoke.sh` (en Claude Code, la skill `verificar`).
 5. Si el cambio altera una regla del enunciado, el contrato o una decisión del
    documento de diseño, actualizar en el mismo cambio la sección 2 del
    documento, el README y este archivo. Decir en el resumen qué invariantes de
@@ -45,6 +46,7 @@ npx vitest run src/domain/reminder-schedule.spec.ts   # un unitario
 npm run test:e2e -- test/reminder-job.e2e-spec.ts     # un e2e
 docker compose up --build -d --wait                   # api :3000, db, provider :4010
 scripts/smoke.sh        # recorrido completo contra el compose levantado
+docker compose down -v  # bajar el compose y borrar su base
 ```
 
 - `verify` ejecuta `lint` (oxlint con reglas que usan los tipos), `typecheck`
@@ -57,6 +59,21 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
   proveedor en el puerto 4011, así que no interfieren con un compose levantado.
   El `globalSetup` (`test/support/global-setup.ts`) crea esa base si no existe
   y se niega a arrancar si el 4011 ya tiene un proveedor.
+- En un worktree, `export COMPOSE_PROJECT_NAME=clinicsay` (o
+  `docker compose -p clinicsay ...`) antes de `npm run db:up` y del compose:
+  sin eso el proyecto toma el nombre de la carpeta, y dos worktrees levantan
+  dos compose que chocan en los mismos puertos. Como el proyecto es uno solo,
+  se verifica un worktree a la vez: el `up --build` de uno sustituye la api
+  del otro y `down -v` borra la base de sus e2e.
+- `scripts/smoke.sh` necesita bash, curl, grep y sed (sin jq). Usa el ejemplo del
+  enunciado (cita el 28/03/2027 a las 10:00 de Madrid), comprueba
+  `{"processed":1}`, el texto exacto y la `Idempotency-Key` en el proveedor y
+  el recordatorio `sent`, y sale con 1 y un mensaje `smoke: FALLO: ...` si
+  algo no cuadra. Se puede repetir sobre la misma base: vacía el proveedor,
+  usa un teléfono al azar y lanza antes una pasada para que los pendientes de
+  otras pruebas no cuenten. `API_URL` y `PROVIDER_URL` cambian los destinos.
+- La skill del proyecto `.claude/skills/verificar` corre `npm run verify` y el
+  humo con el compose y explica qué hacer si algo falla.
 - Un cambio está terminado cuando `npm run verify` pasa y se ha visto la
   salida.
 
@@ -89,6 +106,8 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 | Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
+| Arranque con `docker compose up --build` (migraciones, `/health`, `CLOCK_MODE=test`, Postgres en `127.0.0.1:55432`) y recorrido completo: reloj → cita → pasada → mensaje exacto en el proveedor | `docker-compose.yml`, `Dockerfile`, `scripts/smoke.sh` | job `compose` del CI (`scripts/smoke.sh`) |
+| Verificación completa para agentes (lint, tipos, unitarios, e2e y humo) | `.claude/skills/verificar/SKILL.md` | — |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
 
@@ -136,7 +155,9 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 
 ## Invariantes
 
-Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
+Casi todos tienen un test que falla si un cambio los rompe. Los que dependen
+de la revisión (por ejemplo, que la hora solo salga de `Clock`) se cuentan en
+el apartado 3 del README; quien toque uno de ellos añade el test.
 
 - **Hora:** la hora de negocio sale siempre del puerto `Clock`. Nada de
   `new Date()` sin argumentos, `Date.now()` ni `now()` de Postgres en
@@ -280,10 +301,11 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   escriben con `insert` y `nativeUpdate`, una lectura posterior en la misma
   transacción vería la fila vieja; por eso los repositorios de citas y
   recordatorios leen con `disableIdentityMap: true`.
-- La plantilla de Nest sugiere `@nestjs/idempotency`, `@nestjs/resilience`,
-  Nest Observe y trae skills genéricas en `.claude/skills/`. Aquí no se usan: la idempotencia y los reintentos son
-  reglas del enunciado y viven en el dominio y en Postgres, donde se pueden
-  probar con el reloj de test.
+- La plantilla de Nest sugiere `@nestjs/idempotency`, `@nestjs/resilience` y
+  Nest Observe. Aquí no se usan: la idempotencia y los reintentos son reglas
+  del enunciado y viven en el dominio y en Postgres, donde se pueden probar con
+  el reloj de test. Las skills genéricas que trae la plantilla se quitaron; la
+  única skill es la del proyecto, `.claude/skills/verificar`.
 
 ## Reglas de código
 
@@ -348,5 +370,8 @@ Se aplican a todo código nuevo y a los archivos que un cambio toca.
   con merge commit (sin squash ni `--force`). La PR dice qué cambia, por qué,
   si hay migración y qué comandos se corrieron con su resultado.
 - Lo que se sube se redacta en neutro y sin datos personales.
+- CI (`.github/workflows/ci.yml`): `checks` corre lint, tipos, unitarios, e2e
+  (con un Postgres de servicio) y build; `compose` levanta el compose, pide
+  `/health` y corre `scripts/smoke.sh`, y vuelca los logs si algo falla.
 - CI: imágenes con tag exacto (`postgres:17-alpine`, `node:24-alpine`),
   `timeout-minutes` en cada job y nunca `continue-on-error`.
