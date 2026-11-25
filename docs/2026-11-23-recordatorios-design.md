@@ -154,7 +154,7 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 | Indicación en la reunión | Relación con el enunciado | Cómo se incorpora |
 |---|---|---|
 | Citas virtuales con hora peninsular (Madrid) y la misma franja de silencio | No aparece; no lo contradice | Campo opcional `virtual` (por defecto `false`) en `POST /appointments`. La respuesta solo lo incluye cuando vale `true`, así que una cita creada sin el campo responde exactamente con la forma del contrato. Con `true`, hora de envío, franja y texto usan `Europe/Madrid`. Sin el campo, todo funciona como dice el contrato. |
-| Reintentar cada minuto | Choca (1 min y 5 min, 3 intentos) | Se aplica el enunciado. Los retrasos viven en una sola constante del dominio y se cambian en una línea. Se cuenta en el README. |
+| Reintentar cada minuto | Difiere del enunciado (1 min y 5 min, 3 intentos) | Se aplica el enunciado. Los retrasos viven en una sola constante del dominio y se cambian en una línea. Se cuenta en el README. |
 | Si cae en la franja, a las 09:00 del día siguiente | Coincide entre 21:00 y 24:00; entre 00:00 y 09:00 el enunciado dice «las 09:00 siguientes» | Siempre la siguiente 09:00 local. |
 | La clínica tiene su configuración (zona, horario de atención) | El contrato solo tiene `timezone` | Franja como constante del dominio; configuración por clínica en «qué haría con más tiempo». |
 | Clave única para no duplicar; comprobar si un 504 se entregó antes de reintentar | Compatible | `Idempotency-Key` = id del recordatorio en todos sus intentos. El reintento con la misma clave es la comprobación: si ya se entregó, el proveedor responde 200 `duplicate`. |
@@ -169,7 +169,7 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
 | Desplegar sin cortar a las clínicas y respetando las ejecuciones en curso | Compatible | Cierre ordenado: al recibir SIGTERM no se toman más recordatorios y se espera a la pasada en curso. Despliegue gradual y migraciones compatibles en la nota de producción. |
 | Redis u otras herramientas para colas | Permitido | No hace falta: Postgres con `SKIP LOCKED` hace de cola. Redis o SQS en la nota de producción. |
 | 3-4 horas como meta | Compatible | Primero el flujo principal; lo que falte se cuenta en el README. |
-| 2 000 recordatorios al día | Choca (20 000) | La nota de producción usa 20 000. |
+| 2 000 recordatorios al día | Difiere del enunciado (20 000) | La nota de producción usa 20 000. |
 
 ### Ambigüedades y cómo se resuelven (se cuentan en el README)
 
