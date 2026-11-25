@@ -23,6 +23,7 @@ import {
   type ReminderBody,
 } from './support/fixtures.js';
 import { holdLock } from './support/locks.js';
+import { type ResetServer, startResetServer } from './support/reset-server.js';
 import { startTcpProxy, type TcpProxy } from './support/tcp-proxy.js';
 
 // Hora del servicio al crear las citas.
@@ -652,18 +653,20 @@ describe('job de envío', () => {
 
   describe('sin conexión con el proveedor', () => {
     let offline: TestApp;
+    let resetting: ResetServer;
 
     beforeAll(async () => {
-      // Un puerto que acaba de quedar libre: la conexión se rechaza.
-      const closed = await startTcpProxy('127.0.0.1', TEST_PROVIDER_PORT);
-      await closed.close();
+      // Un servidor propio que corta cada conexión al aceptarla. Un puerto
+      // recién liberado no vale: otro proceso puede ocuparlo y responder.
+      resetting = await startResetServer();
       offline = await startTestApp({
-        providerUrl: `http://127.0.0.1:${closed.port}`,
+        providerUrl: `http://127.0.0.1:${resetting.port}`,
       });
     });
 
     afterAll(async () => {
       await offline.close();
+      await resetting.close();
     });
 
     it('un error de red se reintenta al minuto', async () => {
