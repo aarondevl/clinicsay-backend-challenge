@@ -8,7 +8,8 @@ un proveedor de mensajes y un webhook recibe las respuestas SI/NO.
 ## Fuentes de verdad
 
 1. `enunciado.pdf`: reglas de negocio y entregables.
-2. `openapi.yaml`: el contrato de la API; los tests de evaluación lo usan.
+2. `openapi.yaml`: el contrato de la API; los tests de evaluación lo usan y
+   `test/contract.e2e-spec.ts` valida contra él cada respuesta.
 3. `provider/server.mjs`: el proveedor falso con el que se evalúa. No se
    modifica, igual que el bloque `provider` de `docker-compose.yml`.
 4. Las secciones 1 y 2 de `docs/2026-11-23-recordatorios-design.md`:
@@ -26,10 +27,14 @@ un proveedor de mensajes y un webhook recibe las respuestas SI/NO.
    controlador no decide nada.
 4. Ver pasar ese test y después `npm run verify`. Antes de una PR, también
    el compose y `scripts/smoke.sh` (en Claude Code, la skill `verificar`).
+   `verify` incluye `test/contract.e2e-spec.ts`: si falla, una respuesta se
+   ha apartado de `openapi.yaml`.
 5. Si el cambio altera una regla del enunciado, el contrato o una decisión del
    documento de diseño, actualizar en el mismo cambio la sección 2 del
    documento, el README y este archivo. Decir en el resumen qué invariantes de
-   la lista toca.
+   la lista toca. Un campo de respuesta que el contrato no tiene se declara
+   además en `EXTENSIONS` de `test/support/contract.ts`, y un código que no
+   documenta no pasa por `expectContract` (ver «Tests»).
 
 Si se pide un cambio de regla (otros reintentos, otra franja, un campo nuevo),
 se hace: la petición manda sobre el enunciado. Se pregunta solo cuando la
@@ -44,6 +49,7 @@ npm run db:up           # levanta solo el Postgres del compose (lo necesitan los
 npm run verify          # lint + tipos + unitarios + e2e: el «terminado»
 npx vitest run src/domain/reminder-schedule.spec.ts   # un unitario
 npm run test:e2e -- test/reminder-job.e2e-spec.ts     # un e2e
+npm run test:e2e -- test/contract.e2e-spec.ts         # respuestas contra openapi.yaml
 docker compose up --build -d --wait                   # api :3000, db, provider :4010
 scripts/smoke.sh        # recorrido completo contra el compose levantado
 docker compose down -v  # bajar el compose y borrar su base
@@ -97,8 +103,8 @@ docker compose down -v  # bajar el compose y borrar su base
 | Crear clínicas y pacientes (zona IANA → 400, `name` con `IsStorableText`, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
 | Formato de errores y validación (fechas de entrada: `IsIsoDateTimeWithZone` y `parseIsoDateTimeWithZone`, años 1 a 9999 en UTC; textos que llegan a Postgres: `IsStorableText` y `MAX_TEXT_LENGTH`) | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
-| Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
-| Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
+| Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts`, `test/contract.e2e-spec.ts` |
+| Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts`, `test/contract.e2e-spec.ts` |
 | Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
 | Bloqueo de la cita y de sus pendientes (`FOR UPDATE`, sin `SKIP LOCKED`) y lecturas sin identity map | `src/infrastructure/persistence/repositories/appointment.repository.ts` (`lockById`), `reminder.repository.ts` (`lockPendingByAppointment`) | `test/reschedule-cancel.e2e-spec.ts` |
 | Cita de una respuesta: último `sent` a ese teléfono por `send_seq`, sin canceladas ni empezadas, con `FOR UPDATE OF` la cita | `appointment.repository.ts` (`lockLatestRepliable`) | `test/webhook.e2e-spec.ts` |
@@ -107,6 +113,7 @@ docker compose down -v  # bajar el compose y borrar su base
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
 | Base caída en un caso de uso → 503 (`isDatabaseUnavailable` en `Transactions.run`) | `src/infrastructure/persistence/database-unavailable.ts`, `mikro-orm-transactions.ts` | `database-unavailable.spec.ts`, `test/clinics-patients.e2e-spec.ts` |
 | Arranque con `docker compose up --build` (migraciones, `/health`, `CLOCK_MODE=test`, Postgres en `127.0.0.1:55432`) y recorrido completo: reloj → cita → pasada → mensaje exacto en el proveedor | `docker-compose.yml`, `Dockerfile`, `scripts/smoke.sh` | job `compose` del CI (`scripts/smoke.sh`) |
+| Contrato: cada operación y código de `openapi.yaml` con su esquema en modo estricto (sin propiedades de más salvo `virtual: true`, fechas como `toApiDate`), 4xx con exactamente `{ error }`, sin cuerpo donde no hay contenido, y cobertura de todas las respuestas documentadas | `openapi.yaml`, `test/support/contract.ts` (`expectContract`, `uncoveredResponses`, `EXTENSIONS`, `NO_CONTENT_BODIES`) | `test/contract.e2e-spec.ts`, `test/support/contract.spec.ts` |
 | Verificación completa para agentes (lint, tipos, unitarios, e2e y humo) | `.claude/skills/verificar/SKILL.md` | — |
 
 Cada PR que crea, mueve o renombra uno de estos archivos actualiza la tabla.
@@ -142,11 +149,14 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 - **Campo nuevo en una entidad:** migración nueva (y, si es un estado, el
   `check` correspondiente) → `entities.ts` → tipo del dominio → repositorio
   (fila ↔ dominio) → DTO de entrada (un texto, con `@IsStorableText`) y
-  presentador de salida → test e2e.
+  presentador de salida → test e2e. Si el campo sale en una respuesta y no
+  está en `openapi.yaml`, es una extensión: va a `EXTENSIONS` de
+  `test/support/contract.ts`.
 - **Caso de uso nuevo:** clase en `src/application/<área>/` que recibe sus
   puertos por constructor → `useFactory` en `app.module.ts` → controlador.
 - **Endpoint nuevo:** solo si está en `openapi.yaml` o se pide expresamente. Su
-  test e2e va en `test/<área>.e2e-spec.ts`.
+  test e2e va en `test/<área>.e2e-spec.ts`, y cada código que documente,
+  además, en `test/contract.e2e-spec.ts` con `expectContract`.
 - **Migración:** archivo nuevo en `src/infrastructure/persistence/migrations/`
   con SQL escrito a mano, añadido a `migrationsList`. Nunca se edita una
   migración ya mergeada. La cadena completa crea la base desde cero (el CI
@@ -256,6 +266,14 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
   lo incluye cuando vale `true`, para que una cita normal tenga exactamente la
   forma del contrato.
 - **Texto:** el de `openapi.yaml`, carácter por carácter.
+- **Contrato:** una respuesta con un código documentado tiene la forma de
+  `openapi.yaml` y nada más: ninguna propiedad que el contrato no declare (la
+  única extensión es `virtual: true` en una cita), fechas como `toApiDate`,
+  4xx con exactamente `{ "error": "<mensaje>" }` y sin cuerpo donde el
+  contrato no tiene contenido (salvo el `{ "status": "ok" }` de `/health`).
+  Los códigos que el contrato no documenta (503 con la base caída, 400 de
+  `PUT /test/clock`, 500) no pasan por `expectContract` y se prueban en su
+  e2e.
 - **Webhook:** responde 200 aunque ignore el mensaje (400 solo con un cuerpo
   fuera de esquema, que incluye los textos y fechas que Postgres no guarda). El `messageId` se registra en la misma transacción que el
   efecto, y uno repetido no hace nada aunque la primera vez se ignorara. La
@@ -296,6 +314,22 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
 - Un bloqueo que otra transacción retiene se prueba con `holdLock`
   (`test/support/locks.ts`): abre la transacción, toma el bloqueo y no
   confirma hasta `release()`.
+- Contrato: `expectContract(res, 'patch', '/appointments/{id}')`
+  (`test/support/contract.ts`) valida una respuesta de supertest contra
+  `openapi.yaml` en modo estricto. Falla si el código no está documentado
+  para esa operación, si el cuerpo no cumple su esquema (en una copia en
+  memoria con `additionalProperties: false` y el patrón de `toApiDate` en
+  cada `date-time`; el archivo no se toca), si un 4xx no es exactamente
+  `{ "error": <string> }` o si una respuesta sin contenido trae cuerpo. La
+  ruta es la plantilla de `openapi.yaml`, con `{id}`, no la URL pedida. Una
+  propiedad que el contrato no tiene va a `EXTENSIONS` con su porqué (hoy
+  solo `virtual`) y el cuerpo de una respuesta sin contenido, a
+  `NO_CONTENT_BODIES` (hoy solo `/health`). `test/contract.e2e-spec.ts` pasa
+  cada respuesta por el helper y acaba con un test que falla si
+  `uncoveredResponses()` no está vacío: todo endpoint o código nuevo de
+  `openapi.yaml` necesita ahí un caso que lo ejercite. Ese último test solo
+  vale con el archivo entero, no filtrado con `-t`.
+  `test/support/contract.spec.ts` fija el modo estricto sin base.
 - Cada test crea sus propios datos y fija la hora con `setClock`. Las reglas del
   proveedor y los recordatorios pendientes son globales, así que cada e2e
   empieza con `t.reset()` (vacía las tablas y el proveedor). Los e2e corren en
@@ -309,7 +343,9 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
 ## Trampas del stack
 
 - ESM: los imports relativos terminan en `.js`, no existe `__dirname` (se usa
-  `import.meta.dirname`) y los mocks son `vi.fn()`.
+  `import.meta.dirname`) y los mocks son `vi.fn()`. Ajv y ajv-formats son
+  CommonJS: `Ajv2020` se importa por nombre de `ajv/dist/2020.js` y el plugin
+  de formatos es la propiedad `default` del import por defecto.
 - Una clase que se usa como token de inyección o como tipo de `@Body()` no se
   importa con `import type`: se pierde la metadata y la inyección o la
   validación fallan sin avisar.

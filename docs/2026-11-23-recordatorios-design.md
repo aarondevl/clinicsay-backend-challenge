@@ -219,7 +219,7 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   | Ids | UUIDv7 con el paquete `uuid` |
   | Fechas | Luxon, con todas las horas en `timestamptz` |
   | Proveedor | `fetch` nativo con `AbortSignal.timeout(5000)` |
-  | Tests | Vitest (plantilla de Nest) y supertest; e2e contra Postgres real y `provider/server.mjs` real |
+  | Tests | Vitest (plantilla de Nest) y supertest; e2e contra Postgres real y `provider/server.mjs` real; el contrato se valida con Ajv (build 2020), `ajv-formats` y `yaml` (2026-11-24) |
   | Lint | oxlint `--type-aware` de la plantilla (`.oxlintrc.json`) con `typescript/no-floating-promises` como error y `typescript/no-explicit-any` activado; Prettier comprobado con `prettier --check` |
   | CI | GitHub Actions: lint, tipos, unitarios, e2e y humo con `docker compose` |
 
@@ -435,6 +435,30 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     `^[^\p{L}]+|[^\p{L}]+$` y el flag `g`, como decía el plan: esa
     expresión retrocede en cada posición y un texto de 100 000 caracteres
     tardaba 10 s, con el proceso bloqueado (reproducido).
+- **Test de contrato (2026-11-24):** `test/contract.e2e-spec.ts` valida cada
+  respuesta contra `openapi.yaml` con `expectContract`
+  (`test/support/contract.ts`), en vez de copiar sus valores a mano como los
+  demás e2e, porque los tests de evaluación miden contra ese archivo. Es más
+  estricto que el contrato, en una copia en memoria de sus esquemas, porque
+  lo que el contrato deja abierto es justo donde un test oculto con
+  `toEqual` fallaría:
+  - `additionalProperties: false` en cada objeto con `properties`. La única
+    excepción es `virtual` en `Appointment`, con `const: true` (tabla de
+    indicaciones del expositor);
+  - cada `date-time` lleva el patrón de `toApiDate` (UTC con `Z`, sin
+    `.000`), que el contrato pide en `info.description` y que `format:
+    date-time` no comprueba;
+  - un 4xx es exactamente `{ "error": <string> }` con texto, la convención
+    de `info.description`, aunque el contrato no le dé esquema;
+  - una respuesta sin contenido va vacía (el 204 del reloj y el 200 del
+    webhook, ver «Webhook»), salvo el `{ "status": "ok" }` que `/health` ya
+    devolvía.
+
+  Un código que la operación no documenta hace fallar el helper, así que no
+  se usa con el 503 de la base caída ni con el 400 de `PUT /test/clock`, que
+  el contrato no recoge; esos siguen en su e2e. El último test falla si
+  alguna respuesta documentada no se ejercitó. Las dependencias son solo de
+  desarrollo, y `ajv` y `ajv-formats` ya llegaban con `@nestjs/cli`.
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
@@ -1967,3 +1991,38 @@ Rama `docs/entrega`.
   clinicsay up --build -d --wait` con los tres servicios sanos y
   `./scripts/smoke.sh` con `exit=0`; después `docker compose -p clinicsay
   down -v`. Siguiente paso: revisar y mergear la PR.
+- 2026-11-24: añadido en `test/contrato-openapi` un test de contrato. Hasta
+  ahora ningún test leía `openapi.yaml`: los e2e copiaban sus valores a mano,
+  y los tests de evaluación miden contra ese archivo.
+  - `test/support/contract.ts` (`expectContract`, `uncoveredResponses`) carga
+    `openapi.yaml` con `yaml` y valida con Ajv 2020 y `ajv-formats` en modo
+    estricto (sección 2, «Test de contrato»). `test/support/contract.spec.ts`
+    fija ese modo sin base (36 unitarios);
+  - `test/contract.e2e-spec.ts` (50 e2e) ejercita las diez operaciones y sus
+    21 respuestas documentadas, con citas en cada estado de cita y de
+    recordatorio, una cita virtual y fechas con milisegundos. El último test
+    falla si alguna respuesta documentada no se ejercitó;
+  - no encontró ninguna desviación del contrato, así que `src/` no cambia.
+    Sin migraciones; dependencias de desarrollo nuevas: `ajv`, `ajv-formats`
+    y `yaml`;
+  - `AGENTS.md`: fila del mapa, invariante «Contrato», uso del helper en
+    «Tests», recetas, «Cómo hacer un cambio» y la trampa de importar Ajv
+    desde ESM. README: cómo se comprueba el contrato.
+
+  Cada test se vio fallar por su motivo. Los unitarios, primero sin el
+  módulo; después, una mutación por regla del helper (sin
+  `additionalProperties: false`, sin el patrón de fechas, sin la extensión
+  `virtual` o con `virtual` booleano, sin la regla de los 4xx, sin comprobar
+  el cuerpo vacío, el código documentado o la cobertura) tumba solo sus
+  tests. El e2e, con mutaciones temporales de `src/`: un `sendSeq` de más en
+  el presentador (21 en rojo), fechas con `.000` (21), `virtual: false` en la
+  respuesta (19), errores con `statusCode` (29), el webhook sin
+  `@HttpCode(200)`, que responde un 201 no documentado (3), un cuerpo en el
+  200 del webhook (3) y el bloque de `PATCH` saltado (la cobertura lista
+  `PATCH /appointments/{id}` 400, 404 y 409).
+
+  Verificación: `npm run verify` en verde (21 archivos y 272 unitarios, 9
+  archivos y 244 e2e), `docker compose -p clinicsay up --build -d --wait`
+  con api y db sanas y el proveedor arriba, y `./scripts/smoke.sh` con
+  `exit=0`; después `docker compose -p clinicsay down -v`. Siguiente paso:
+  revisar y mergear la PR.

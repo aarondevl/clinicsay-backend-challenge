@@ -12,7 +12,8 @@ y aplica las respuestas SI/NO que llegan por un webhook.
   test, invariantes, comandos): [`AGENTS.md`](AGENTS.md).
 
 Stack: Node 24, TypeScript estricto, NestJS 12 (ESM), MikroORM 7, Postgres 17,
-Luxon, Vitest y supertest, oxlint y Prettier, GitHub Actions.
+Luxon, Vitest y supertest (con Ajv para el test de contrato), oxlint y
+Prettier, GitHub Actions.
 
 ## 1. Cómo levantarlo y pasar los tests
 
@@ -36,8 +37,21 @@ npm run verify       # lint (oxlint + Prettier), tipos, unitarios y e2e
   real con `createApp` contra Postgres (base `clinicsay_test`, que crean si no
   existe) y contra el proveedor real de `provider/server.mjs`, que lanzan en el
   puerto 4011: no interfieren con un compose levantado.
-- `npm run verify` es la definición de terminado: 19 archivos y 212 unitarios,
-  8 archivos y 185 e2e.
+- El contrato se comprueba contra el propio `openapi.yaml`, no contra valores
+  copiados a mano: `test/contract.e2e-spec.ts` ejercita cada operación y cada
+  código documentado (201, 200, 204, 400, 404 y 409) y valida cada respuesta
+  con `expectContract` (`test/support/contract.ts`, Ajv con JSON Schema
+  2020-12). Es más estricto que el contrato, en una copia en memoria de sus
+  esquemas: no admite propiedades que el contrato no declara (salvo
+  `virtual: true` en una cita), exige las fechas en UTC con `Z` y sin
+  milisegundos cuando son cero, los 4xx con exactamente `{ "error": "..." }`
+  y sin cuerpo donde el contrato no tiene contenido (salvo el
+  `{ "status": "ok" }` de `/health`). El último test falla si alguna
+  respuesta documentada no se ejercitó. Quedan fuera los códigos que el
+  contrato no documenta: el 503 con la base caída y el 400 de
+  `PUT /test/clock`.
+- `npm run verify` es la definición de terminado: 21 archivos y 272 unitarios,
+  9 archivos y 244 e2e.
 
 Prueba de humo contra el compose (necesita bash, curl, grep y sed; sin jq):
 
