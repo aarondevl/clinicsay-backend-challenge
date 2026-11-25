@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Transactions } from '../src/application/ports/transactions.js';
 import type { Appointment } from '../src/domain/appointment.js';
@@ -245,6 +246,22 @@ describe('webhook de respuestas', () => {
       expect((await statesOf(created.id)).status).toBe('scheduled');
     });
 
+    it('acepta un messageId de 255 caracteres de 7 bytes y lo deduplica', async () => {
+      const created = await sentAppointment();
+      // El caso más largo en UTF-8 que cuenta `@MaxLength`: emoji (4 bytes)
+      // más selector de variante (3 bytes) por carácter, unos 1,8 kB.
+      const messageId = '😀\u{FE0F}'.repeat(255);
+      await replyOk('SI', { messageId });
+      await replyOk('NO', { messageId });
+      expect((await statesOf(created.id)).status).toBe('confirmed');
+    });
+
+    it('un text con NUL se ignora con 200: no llega a la base', async () => {
+      const created = await sentAppointment();
+      await replyOk('S\u0000I');
+      expect((await statesOf(created.id)).status).toBe('scheduled');
+    });
+
     it('«Sí, gracias» se ignora con 200', async () => {
       const created = await sentAppointment();
       await replyOk('Sí, gracias');
@@ -476,6 +493,32 @@ describe('webhook de respuestas', () => {
         { ...valid, receivedAt: '2027-03-27T09:00:00' },
       ],
       ['con receivedAt que no es una fecha', { ...valid, receivedAt: 'ayer' }],
+      // Lo que sigue pasaba el DTO y Postgres lo rechazaba: 500, y el
+      // proveedor reenviaría el mensaje sin fin.
+      ['con messageId con NUL', { ...valid, messageId: 'a\u0000b' }],
+      ['con from con NUL', { ...valid, from: `${PHONE}\u0000` }],
+      [
+        'con messageId de más de 255 caracteres',
+        { ...valid, messageId: 'a'.repeat(256) },
+      ],
+      [
+        // Aleatorio para que Postgres no lo comprima: pasa de los 2704 bytes
+        // de una clave btree.
+        'con messageId de 2800 caracteres aleatorios',
+        { ...valid, messageId: randomBytes(1400).toString('hex') },
+      ],
+      [
+        'con from de más de 200 caracteres',
+        { ...valid, from: '+'.repeat(201) },
+      ],
+      [
+        'con receivedAt en el año 0',
+        { ...valid, receivedAt: '0000-01-01T00:00:00Z' },
+      ],
+      [
+        'con receivedAt que en UTC pasa al año 10000',
+        { ...valid, receivedAt: '9999-12-31T23:30:00-01:00' },
+      ],
     ])('un cuerpo %s → 400 { error }', async (_label, body) => {
       const created = await sentAppointment();
       const res = await t.http

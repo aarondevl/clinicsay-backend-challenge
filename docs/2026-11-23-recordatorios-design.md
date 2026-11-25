@@ -270,6 +270,44 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
   día le pondría el 1, y un año de 5 cifras acababa en 500.
   `parseIsoDateTimeWithZone`, en el mismo archivo, convierte con el mismo
   parser y lanza en vez de completar una fecha.
+- **Rango de fechas de entrada (2026-11-24):** una fecha de entrada (`startsAt`,
+  `receivedAt`, `now` del reloj) tiene que caer en UTC entre los años 1 y
+  9999; si no, es 400 de esquema con su propio mensaje. MikroORM envía las
+  fechas con `toISOString()`: Postgres no tiene año 0 (`22008`) y lee el
+  `+010000-…` de un año de 5 cifras como un offset (`22009`). Las dos
+  pasaban el validador y acababan en 500 (reproducido); `PUT /test/clock`
+  respondía 204, pero después el job y el webhook daban 500 en cada llamada.
+  El reloj no se guarda, pero entra en esas consultas, así que lleva la misma
+  regla. La comprobación está en `isIsoDateTimeWithZone`, que ya usan todos
+  los DTO, y no en Postgres.
+- **Textos de entrada (2026-11-24):** el decorador `@IsStorableText(máximo)`
+  de `src/http/validation.ts` junta `@IsString()`, `@MaxLength()` y una regla
+  sin el carácter NUL. Lo llevan los textos del cuerpo que se guardan o se
+  consultan en Postgres: `name` de clínicas y pacientes, y `messageId` y
+  `from` del webhook. Un NUL hacía que Postgres rechazara la consulta
+  (`08P01`) y un `messageId` aleatorio de unos 2700 caracteres pasaba del
+  máximo de una clave btree (2704 bytes, `54000`): 500 los dos
+  (reproducido). Con 10 000 caracteres repetidos no fallaba, porque Postgres
+  comprime la clave. Los límites están en `MAX_TEXT_LENGTH`, porque el
+  contrato no fija ninguno:
+  - `messageId`: 255. Tal como cuenta `@MaxLength`, un carácter ocupa como
+    mucho 7 bytes en UTF-8 (emoji más selector de variante), así que 255 son
+    unos 1,8 kB y caben en la clave. Un id de proveedor real tiene decenas de
+    caracteres;
+  - `name`: 200. Se guarda y va dentro del texto del recordatorio; ningún
+    nombre real se acerca;
+  - `from`: 200. No hace falta para la base (solo se compara con
+    `sent_to`), pero así todo texto que llega a Postgres sigue la misma
+    regla, y un teléfono en cualquier formato (`+34…`, `whatsapp:+34…`) queda
+    muy por debajo. Sigue sin validarse como E.164.
+
+  En el webhook también es 400 y no 200: el contrato reserva el 400 para un
+  cuerpo fuera de esquema, y un mensaje con un `messageId` que no se puede
+  guardar no se puede deduplicar. `text` se queda con `@IsString()`: no se
+  guarda ni se consulta, y un texto con NUL se ignora con 200 como cualquier
+  otro que no es SI ni NO. El resto de campos ya no llegaba a Postgres con un
+  NUL: `timezone` no pasa `isValidTimeZone`, `phone` no pasa la expresión de
+  E.164 y los ids no pasan `isId`.
 - **Reprogramar y cancelar (2026-11-24):**
   - los dos casos de uso bloquean primero la cita (`FOR UPDATE`) y después
     sus pendientes (`FOR UPDATE` sin `SKIP LOCKED`). Dos `PATCH` a la vez se
@@ -1632,3 +1670,40 @@ Rama `docs/entrega`.
   `from` no E.164 con 200, el 200 sin cuerpo y un texto de 100 000
   caracteres en 6 ms. `scripts/smoke.sh` llega con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 9 escribe
   el README y la nota de producción con lo pendiente de arriba.
+- 2026-11-24: arreglado en `fix/validar-entradas` el hallazgo I2 de la
+  revisión de `main` previa a la tarea 9: había cuerpos que pasaban el DTO y
+  Postgres rechazaba, y la API respondía 500 donde tocaba 400. En el webhook
+  era peor, porque el proveedor reenviaría el mensaje sin fin. Reproducido
+  antes de arreglar, con un spec temporal contra la app real:
+  - NUL en `name` de clínicas y pacientes y en `messageId` o `from` del
+    webhook (con texto SI): 500 por `08P01`. Un NUL en `text` daba 200 y
+    sigue así;
+  - `messageId` de unos 2700 caracteres aleatorios: 500 por `54000`
+    (`index row size 2712 exceeds btree version 4 maximum 2704`). Con 10 000
+    `x` daba 200, porque Postgres comprime la clave;
+  - año 0 (`22008`) y fechas que en UTC pasan al año 10000 (`22009`) en
+    `startsAt` y `receivedAt`: 500. En `PUT /test/clock` respondía 204, pero
+    después el job y el webhook daban 500.
+
+  Entran `@IsStorableText` y `MAX_TEXT_LENGTH` y el rango de años en
+  `isIsoDateTimeWithZone`, con su propio mensaje (sección 2, «Rango de
+  fechas de entrada» y «Textos de entrada»). Sin migraciones ni dependencias
+  nuevas. `test-clock.controller.ts` no se toca: su DTO ya usa el validador,
+  y `new Date()` da el mismo instante que Luxon en todas las formas que
+  acepta.
+
+  Cada test nuevo se vio fallar por su motivo antes del arreglo: los
+  unitarios del rango de años, con `true` donde se esperaba `false`; los de
+  `IsStorableText`, contra un esqueleto que solo aplicaba `@IsString()`; y
+  los 16 e2e, con 500 (NUL, clave btree, años), 201 o 200 (longitud de más),
+  204 (reloj) o 404 (`startsAt` en el año 0, que antes se validaba como
+  regla de negocio, después de buscar la clínica). Los tres de borde que
+  pasaban desde el principio (un `name` de 200, un `messageId` de 255
+  caracteres de 7 bytes que se deduplica y un `text` con NUL que se ignora)
+  caen con una mutación cada uno: límite de 199, límite de 254 y
+  `@IsStorableText` en `text`.
+
+  Queda para otro cambio: con el reloj de test en los últimos minutos del
+  año 9999, un reintento cae en el año 10000 y el job da 500 (reproducido
+  con `9999-12-31T23:58:00Z` y dos 503). No es una entrada, sino una fecha
+  calculada, y con el reloj del sistema no se da.

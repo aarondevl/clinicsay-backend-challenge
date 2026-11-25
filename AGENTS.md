@@ -76,10 +76,10 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Pasada del job (bloqueo, orden de descartes, llamada, guardado, un recordatorio con error no frena a los demás) | `src/application/reminders/run-reminder-pass.ts`, puerto `Logger` en `src/infrastructure/logging/nest-logger.ts` | `test/reminder-job.e2e-spec.ts`, `nest-logger.spec.ts` |
 | Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
 | `POST /jobs/reminders/run` y cierre ordenado (el controlador registra la pasada con `track`, abortar y esperar a la pasada en `beforeApplicationShutdown`, `enableShutdownHooks` en `createApp`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts`, `src/app.factory.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
-| Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
-| Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
+| Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164; `messageId` y `from` con `IsStorableText`, `text` sin límite), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
+| Crear clínicas y pacientes (zona IANA → 400, `name` con `IsStorableText`, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
-| Formato de errores y validación (fechas de entrada: `IsIsoDateTimeWithZone` y `parseIsoDateTimeWithZone`) | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
+| Formato de errores y validación (fechas de entrada: `IsIsoDateTimeWithZone` y `parseIsoDateTimeWithZone`, años 1 a 9999 en UTC; textos que llegan a Postgres: `IsStorableText` y `MAX_TEXT_LENGTH`) | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
 | Formato de fechas de salida | `src/http/api-date.ts` (`toApiDate`) | `api-date.spec.ts` |
 | Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
 | Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
@@ -122,7 +122,8 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 
 - **Campo nuevo en una entidad:** migración nueva (y, si es un estado, el
   `check` correspondiente) → `entities.ts` → tipo del dominio → repositorio
-  (fila ↔ dominio) → DTO de entrada y presentador de salida → test e2e.
+  (fila ↔ dominio) → DTO de entrada (un texto, con `@IsStorableText`) y
+  presentador de salida → test e2e.
 - **Caso de uso nuevo:** clase en `src/application/<área>/` que recibe sus
   puertos por constructor → `useFactory` en `app.module.ts` → controlador.
 - **Endpoint nuevo:** solo si está en `openapi.yaml` o se pide expresamente. Su
@@ -148,9 +149,18 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   entrada sin zona es 400, y también la que no tiene la forma `date-time` del
   contrato (solo la hora, fecha ordinal o de semana, año de 5 cifras, offset
   de más de 23:59): Luxon completaría lo que falta con la fecha del sistema,
-  no con la del `Clock`. La valida `@IsIsoDateTimeWithZone()` y la convierte
-  `parseIsoDateTimeWithZone`. La hora local se calcula con Luxon y la zona
-  IANA.
+  no con la del `Clock`. También es 400 una fecha que en UTC cae fuera de los
+  años 1 a 9999: MikroORM la envía con `toISOString()` y Postgres no tiene
+  año 0 ni lee un año de 5 cifras (daba 500, y en `PUT /test/clock` dejaba
+  el job y el webhook en 500). La valida `@IsIsoDateTimeWithZone()` y la
+  convierte `parseIsoDateTimeWithZone`. La hora local se calcula con Luxon y
+  la zona IANA.
+- **Textos de entrada:** todo texto del cuerpo que se guarda o se consulta en
+  Postgres pasa por `@IsStorableText(MAX_TEXT_LENGTH.<campo>)`: sin el
+  carácter NUL, que Postgres rechaza con `08P01`, y con una longitud máxima
+  (200 para nombres y `from`; 255 para `messageId`, que es una clave btree y
+  no puede pasar de 2704 bytes). Si no, es 400 de esquema, también en el
+  webhook. El `text` del webhook no llega a la base y solo es `@IsString()`.
 - **Errores:** siempre `{ "error": "<mensaje>" }`. Orden: esquema (400) →
   existencia (404) → estado (409) → regla de negocio (400).
 - **Ids:** un id que no es UUID, en la ruta o en el cuerpo, es 404, igual que
@@ -213,7 +223,7 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   `true`, para que una cita normal tenga exactamente la forma del contrato.
 - **Texto:** el de `openapi.yaml`, carácter por carácter.
 - **Webhook:** responde 200 aunque ignore el mensaje (400 solo con un cuerpo
-  fuera de esquema). El `messageId` se registra en la misma transacción que el
+  fuera de esquema, que incluye los textos y fechas que Postgres no guarda). El `messageId` se registra en la misma transacción que el
   efecto, y uno repetido no hace nada aunque la primera vez se ignorara. La
   respuesta se aplica a la cita del último recordatorio enviado a ese
   teléfono (por `send_seq`, no por `sentAt`) entre las que no han empezado
