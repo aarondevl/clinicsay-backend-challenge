@@ -350,7 +350,34 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     3xx) se reintenta, que con la misma `Idempotency-Key` es seguro. El
     timeout (`AbortSignal.timeout`) cubre también la lectura del cuerpo;
   - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
-    fallidos y descartados;
+    fallidos y descartados. Un aplazado por la franja no cuenta (punto
+    siguiente);
+  - la franja de silencio también se mira al enviar (2026-11-24). La regla 3
+    dice que entre las 21:00 y las 09:00 no se envía nada, y el enunciado
+    solo exceptúa a los reintentos. Aplicarla solo al planificar dejaba
+    salir un primer intento que el job tomaba dentro de la franja: un cron
+    atrasado, una cola acumulada tras una caída o un `scheduledFor` justo
+    antes de las 21:00 que se toma a las 21:00 (reproducido: la cita del
+    11/03/2027 a las 10:00 de Madrid, creada a las 20:59:30 del día antes,
+    salía con la pasada de las 21:00). Ahora, después de los descartes
+    (`too_late`, `no_phone`, `opted_out`, que no llaman) y antes de llamar,
+    `holdForQuietHours` mira si un recordatorio con `attempts` 0 cae en la
+    franja de la zona efectiva (`effectiveTimeZone`, así que una cita
+    virtual usa la de Madrid). Si cae, no se llama al proveedor:
+    - sigue `pending`, con los mismos `attempts` y el mismo `scheduledFor`,
+      y `next_attempt_at` pasa a las 09:00 siguientes (`quietHoursEnd`, que
+      usa la misma lógica y la misma `QUIET_HOURS` que `planReminder`). Es
+      lo que hace un reintento, y `scheduledFor` sigue diciendo la hora que
+      se planificó;
+    - si esas 09:00 no quedan antes del inicio de la cita, queda
+      `skipped`/`too_late` ya, con la misma regla que al crearlo, en vez de
+      esperar a una hora en la que la cita ya habrá empezado.
+
+    El aplazado no cuenta en `processed`: el contrato lo define como los
+    recordatorios que la pasada envió, reintentó o descartó, y este no es
+    ninguno de los tres; contarlo haría que una pasada nocturna sin envíos
+    respondiera como si hubiera trabajado. El `too_late` sí cuenta, porque
+    es un descarte;
   - un error inesperado dentro de la transacción de un recordatorio
     (2026-11-24) deshace solo esa transacción. La pasada lo registra con su
     id, no lo cuenta en `processed`, no lo vuelve a tomar y sigue con los

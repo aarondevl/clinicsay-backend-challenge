@@ -81,16 +81,16 @@ docker compose down -v  # bajar el compose y borrar su base
 
 | Regla | Dónde vive | Test |
 |---|---|---|
-| Hora de envío (día anterior, zona IANA, cambio de horario) y franja `[21:00, 09:00)` | `src/domain/reminder-schedule.ts` (`planReminder`) | `reminder-schedule.spec.ts` |
+| Hora de envío (día anterior, zona IANA, cambio de horario) y franja `[21:00, 09:00)`, al planificar y al enviar | `src/domain/reminder-schedule.ts` (`planReminder`, `quietHoursEnd`) | `reminder-schedule.spec.ts` |
 | Zona efectiva (`virtual` → `Europe/Madrid`) y zonas válidas (`isValidTimeZone`: solo IANA, sin `local`, `system` ni offsets) | `src/domain/time-zones.ts` | `time-zones.spec.ts` |
 | Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
 | Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
-| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, cita que admite SI/NO con `canReceiveReply`, `cancelReminder`, `too_late` al crear con `newReminder`, descartes al enviar con `skipReasonAtSendTime` y `skipReminder`, resultado de cada intento con `recordAttempt`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
+| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, cita que admite SI/NO con `canReceiveReply`, `cancelReminder`, `too_late` al crear con `newReminder`, descartes al enviar con `skipReasonAtSendTime` y `skipReminder`, franja al enviar con `holdForQuietHours` y `postponeReminder`, resultado de cada intento con `recordAttempt`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
-| Pasada del job (bloqueo, orden de descartes, llamada, guardado, un recordatorio con error no frena a los demás) | `src/application/reminders/run-reminder-pass.ts`, puerto `Logger` en `src/infrastructure/logging/nest-logger.ts` | `test/reminder-job.e2e-spec.ts`, `nest-logger.spec.ts` |
+| Pasada del job (bloqueo, orden de descartes, franja de un primer intento, llamada, guardado, un recordatorio con error no frena a los demás) | `src/application/reminders/run-reminder-pass.ts`, puerto `Logger` en `src/infrastructure/logging/nest-logger.ts` | `test/reminder-job.e2e-spec.ts`, `nest-logger.spec.ts` |
 | Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
 | `POST /jobs/reminders/run` y cierre ordenado (el controlador registra la pasada con `track`, abortar y esperar a la pasada en `beforeApplicationShutdown`, `enableShutdownHooks` en `createApp`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts`, `src/app.factory.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
 | Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164; `messageId` y `from` con `IsStorableText`, `text` sin límite), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
@@ -219,7 +219,8 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
   (`ServiceUnavailableError`, 503) y un error antes de tomar ningún
   recordatorio, que si no se repetiría sin fin.
 - **Descartes al enviar**, en este orden: `too_late` (la cita ya empezó),
-  `no_phone`, `opted_out`. Ninguno llama al proveedor.
+  `no_phone`, `opted_out`. Ninguno llama al proveedor. Después, y antes de
+  llamar, la franja de un primer intento (ver «Franja de silencio»).
 - **Proveedor:** 202 o 200 (duplicado) → `sent`, igual que cualquier otro 2xx.
   Cualquier 4xx → `failed`, sin reintento. 5xx, error de red, más de 5000 ms,
   1xx o 3xx → reintento. `attempts` cuenta las llamadas hechas al proveedor.
@@ -238,10 +239,18 @@ el apartado 3 del README; quien toque uno de ellos añade el test.
   cada pasada con `track` y `createApp` llama a `enableShutdownHooks()`, que
   convierte SIGTERM en `app.close()`.
 - **Franja de silencio:** `[21:00, 09:00)` en hora local; lo que cae dentro pasa
-  a las 09:00 siguientes. Las citas con `virtual: true` usan `Europe/Madrid`
-  para la hora, la franja y el texto. `virtual` es una extensión opcional del
-  contrato: por defecto es `false` y la respuesta solo lo incluye cuando vale
-  `true`, para que una cita normal tenga exactamente la forma del contrato.
+  a las 09:00 siguientes. Se aplica al planificar (`planReminder`) y otra vez
+  al enviar: un primer intento (`attempts` 0) que el job toma dentro de la
+  franja no llama al proveedor y se aplaza con `holdForQuietHours`: sigue
+  `pending`, con los mismos `attempts` y `scheduledFor`, y `next_attempt_at`
+  pasa a las 09:00 siguientes de la zona efectiva. Si esas 09:00 no quedan
+  antes del inicio de la cita, queda `skipped`/`too_late`, como al crearlo.
+  Un aplazado no cuenta en `processed`: ni se envió, ni se reintentó, ni se
+  descartó. Los reintentos no esperan. Las citas con `virtual: true` usan
+  `Europe/Madrid` para la hora, la franja y el texto. `virtual` es una
+  extensión opcional del contrato: por defecto es `false` y la respuesta solo
+  lo incluye cuando vale `true`, para que una cita normal tenga exactamente la
+  forma del contrato.
 - **Texto:** el de `openapi.yaml`, carácter por carácter.
 - **Webhook:** responde 200 aunque ignore el mensaje (400 solo con un cuerpo
   fuera de esquema, que incluye los textos y fechas que Postgres no guarda). El `messageId` se registra en la misma transacción que el
