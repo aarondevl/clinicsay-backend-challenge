@@ -69,14 +69,14 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de un id (`isId`) y teléfono E.164 (`E164`) | `src/domain/ids.ts`, `src/domain/patient.ts` | `ids.spec.ts`, `patient.spec.ts` |
 | Ids UUIDv7 en orden creciente (puerto `IdGenerator`) | `src/infrastructure/ids/uuid-v7-id-generator.ts` | `uuid-v7-id-generator.spec.ts` |
 | Texto exacto del mensaje | `src/domain/reminder-message.ts` | `reminder-message.spec.ts` |
-| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, `cancelReminder`, `too_late` al crear con `newReminder`, descartes al enviar con `skipReasonAtSendTime` y `skipReminder`, resultado de cada intento con `recordAttempt`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
+| Transiciones de cita y recordatorio (`hasStarted`, reprogramar, cancelar, confirmar, cita que admite SI/NO con `canReceiveReply`, `cancelReminder`, `too_late` al crear con `newReminder`, descartes al enviar con `skipReasonAtSendTime` y `skipReminder`, resultado de cada intento con `recordAttempt`) | `src/domain/appointment.ts`, `src/domain/reminder.ts` | `appointment.spec.ts`, `reminder.spec.ts` |
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
 | Pasada del job (bloqueo, orden de descartes, llamada, guardado) | `src/application/reminders/run-reminder-pass.ts` | `test/reminder-job.e2e-spec.ts` |
 | Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
 | `POST /jobs/reminders/run` y cierre ordenado (abortar y esperar a la pasada en `beforeApplicationShutdown`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
-| Webhook (deduplicación, cita destino) | `src/application/inbound/handle-inbound-message.ts` | `test/webhook.e2e-spec.ts` |
+| Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
 | Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
 | Formato de errores y validación (fechas de entrada: `IsIsoDateTimeWithZone` y `parseIsoDateTimeWithZone`) | `src/http/error.filter.ts`, `src/http/validation.ts` | `validation.spec.ts`, e2e |
@@ -84,6 +84,7 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Forma de la cita en la respuesta (`virtual` solo si es `true`, sin `nextAttemptAt`, `sentTo` ni `sendSeq`) | `src/http/presenters.ts` (`presentAppointment`) | `test/appointments.e2e-spec.ts` |
 | Recordatorios de una cita por id ascendente | `src/infrastructure/persistence/repositories/reminder.repository.ts` (`listByAppointment`) | `test/appointments.e2e-spec.ts` |
 | Bloqueo de la cita y de sus pendientes (`FOR UPDATE`, sin `SKIP LOCKED`) y lecturas sin identity map | `src/infrastructure/persistence/repositories/appointment.repository.ts` (`lockById`), `reminder.repository.ts` (`lockPendingByAppointment`) | `test/reschedule-cancel.e2e-spec.ts` |
+| Cita de una respuesta: último `sent` a ese teléfono por `send_seq`, sin canceladas ni empezadas, con `FOR UPDATE OF` la cita | `appointment.repository.ts` (`lockLatestRepliable`) | `test/webhook.e2e-spec.ts` |
 | Siguiente recordatorio del job (`FOR UPDATE SKIP LOCKED`, por `next_attempt_at` e id) y número de envío (`reminder_send_seq`) | `reminder.repository.ts` (`lockNextDue`, `nextSendSequence`) | `test/reminder-job.e2e-spec.ts` |
 | Esquema e índices (migraciones listadas en `mikro-orm.config.ts`) | `src/infrastructure/persistence/migrations/` | `test/persistence.e2e-spec.ts` |
 | `GET /health`: 200 con la base migrada, 503 si no responde | `src/infrastructure/persistence/health.controller.ts` | `test/health.e2e-spec.ts` |
@@ -158,8 +159,9 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   `scheduled`. Cancelar una cita cancela su pendiente; si ya estaba
   cancelada, responde 200 sin escribir.
 - **Orden de bloqueo:** primero la cita (`lockById`) y después sus
-  pendientes (`lockPendingByAppointment`). Así dos `PATCH`, o un `PATCH` y un
-  cancelar, se ponen en fila y el segundo ve el pendiente que creó el
+  pendientes (`lockPendingByAppointment`); el webhook bloquea la cita con
+  `lockLatestRepliable`. Así dos `PATCH`, o un `PATCH` y un cancelar o un NO,
+  se ponen en fila y el segundo ve el pendiente que creó el
   primero, y quien espera al job ve el estado final del recordatorio. Quien
   tiene bloqueado un recordatorio nunca espera el bloqueo de su cita: el job,
   que toma el recordatorio con `SKIP LOCKED`, lee la cita sin bloquearla (o
@@ -200,9 +202,14 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
 - **Texto:** el de `openapi.yaml`, carácter por carácter.
 - **Webhook:** responde 200 aunque ignore el mensaje (400 solo con un cuerpo
   fuera de esquema). El `messageId` se registra en la misma transacción que el
-  efecto, y uno repetido no hace nada. La respuesta se aplica a la cita del
-  último recordatorio enviado a ese teléfono (por `send_seq`, no por `sentAt`)
-  entre las que no han empezado ni están canceladas.
+  efecto, y uno repetido no hace nada aunque la primera vez se ignorara. La
+  respuesta se aplica a la cita del último recordatorio enviado a ese
+  teléfono (por `send_seq`, no por `sentAt`) entre las que no han empezado
+  ni están canceladas. «No ha empezado» se mira con `Clock`; `receivedAt`
+  solo se guarda. Si esa cita cambia mientras se espera su bloqueo, Postgres
+  vuelve a evaluar la consulta con la fila confirmada y pasa a la anterior
+  que cumpla. `from` no se valida como E.164: un teléfono sin envíos no
+  encuentra cita.
 
 ## Tests
 

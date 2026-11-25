@@ -33,6 +33,31 @@ export class MikroOrmAppointmentRepository extends AppointmentRepository {
     return row ? toAppointment(row) : null;
   }
 
+  /**
+   * Una sentencia con `FOR UPDATE OF a` (índice `reminder_last_sent`): bloquea
+   * la cita y no el recordatorio, que no cambia. Si espera el bloqueo,
+   * Postgres vuelve a evaluar el `where` con la fila que confirmó la otra
+   * transacción y, si ya no cumple, sigue con la siguiente por `send_seq`.
+   * Después se lee la cita entera, ya bloqueada.
+   */
+  async lockLatestRepliable(
+    phone: string,
+    now: Date,
+  ): Promise<Appointment | null> {
+    const [row] = await this.tx.execute<{ id: string }[]>(
+      `select a.id from appointment a
+        join reminder r on r.appointment_id = a.id
+        where r.status = 'sent' and r.sent_to = ?
+          and a.status <> 'cancelled' and a.starts_at > ?
+        order by r.send_seq desc
+        limit 1
+        for update of a`,
+      [phone, now],
+      'all',
+    );
+    return row ? this.findById(row.id) : null;
+  }
+
   /** Inserta la cita (sin pasar por el identity map). */
   async insert(appointment: Appointment): Promise<void> {
     await this.tx.insert(AppointmentEntity, {

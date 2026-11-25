@@ -46,3 +46,13 @@ export function cancelAppointment(appointment: Appointment): Appointment {
 export function confirmAppointment(appointment: Appointment): Appointment {
   return { ...appointment, status: 'confirmed' };
 }
+
+/**
+ * Indica si una respuesta SI o NO del paciente se puede aplicar a la cita: no
+ * está cancelada y no ha empezado (`hasStarted`).
+ *
+ * @param now Hora del servicio (puerto `Clock`), no la de recepción del mensaje.
+ */
+export function canReceiveReply(appointment: Appointment, now: Date): boolean {
+  return appointment.status !== 'cancelled' && !hasStarted(appointment, now);
+}

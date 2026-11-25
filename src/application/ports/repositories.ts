@@ -43,6 +43,23 @@ export abstract class AppointmentRepository {
    */
   abstract lockById(id: string): Promise<Appointment | null>;
 
+  /**
+   * Devuelve la cita que puede recibir una respuesta desde `phone` y bloquea
+   * su fila (`FOR UPDATE`) hasta el final de la transacción: la del último
+   * recordatorio `sent` a ese teléfono (por `sendSeq`, no por `sentAt`, que
+   * empata con el reloj congelado) entre las que no están canceladas ni han
+   * empezado. Si otra transacción tiene esa cita, espera; si al confirmar
+   * dejó de cumplir, pasa a la anterior que cumpla. `null` si no hay ninguna.
+   *
+   * @param phone Teléfono tal como llega en el mensaje; se compara con el
+   * `sentTo` de los recordatorios.
+   * @param now Hora del servicio (puerto `Clock`).
+   */
+  abstract lockLatestRepliable(
+    phone: string,
+    now: Date,
+  ): Promise<Appointment | null>;
+
   /** Guarda una cita nueva. */
   abstract insert(appointment: Appointment): Promise<void>;
 
@@ -97,10 +114,21 @@ export abstract class ReminderRepository {
   abstract update(reminder: Reminder): Promise<void>;
 }
 
+/** Mensajes entrantes ya recibidos, para tratar cada `messageId` una sola vez. */
+export abstract class InboundMessageRepository {
+  /**
+   * Registra el mensaje si su `messageId` no estaba. Si otra transacción
+   * acaba de registrar el mismo y no ha confirmado, espera a que termine.
+   * @returns `true` si lo registró; `false` si ya estaba.
+   */
+  abstract insertIfNew(messageId: string, receivedAt: Date): Promise<boolean>;
+}
+
 /** Repositorios ligados a una transacción; los entrega `Transactions.run`. */
 export interface Repositories {
   clinics: ClinicRepository;
   patients: PatientRepository;
   appointments: AppointmentRepository;
   reminders: ReminderRepository;
+  inboundMessages: InboundMessageRepository;
 }

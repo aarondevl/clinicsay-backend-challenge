@@ -324,6 +324,31 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     2 recordatorios en vez de 1). Node ya espera a las peticiones HTTP en
     curso y el pool de `pg` a que la transacción suelte su conexión, pero el
     coordinador no depende de esos detalles.
+- **Webhook (2026-11-24):**
+  - una transacción por mensaje. Primero `insertIfNew` (`insert ... on
+    conflict do nothing`): el `messageId` queda registrado junto con su
+    efecto, y uno repetido no hace nada aunque la primera vez se ignorara.
+    Después `parseReply` y, si es SI o NO, la búsqueda de la cita;
+  - la cita sale de una sola consulta: recordatorio `sent` con `sent_to`
+    igual a `from`, cita sin cancelar y con `starts_at` posterior a la hora
+    del servicio, ordenado por `send_seq` descendente, `limit 1` y `FOR
+    UPDATE OF` la cita. Si otra transacción tiene la cita, se espera; al
+    confirmar, Postgres vuelve a evaluar la consulta con la fila nueva y, si
+    ya no cumple (la cancelaron o ya empezó), pasa a la anterior que cumpla.
+    El resultado es el mismo que si la otra transacción hubiera llegado
+    antes. El caso de uso vuelve a comprobar `canReceiveReply` con la fila
+    bloqueada, aunque con esta consulta nunca llega a descartar nada;
+  - «no ha empezado» se mira con `Clock`. `receivedAt` solo se guarda;
+  - NO bloquea los pendientes después de la cita, como cancelar: si el job
+    está enviando uno, espera y, si queda `sent`, ya no lo cancela;
+  - `from` no se valida como E.164: un teléfono sin envíos no encuentra cita
+    y responde 200. El 200 va sin cuerpo, porque el contrato no define
+    ninguno;
+  - `parseReply` busca una sola palabra con una expresión anclada
+    (`^[^\p{L}]*(\p{L}+)[^\p{L}]*$`) y no recorta los extremos con
+    `^[^\p{L}]+|[^\p{L}]+$` y el flag `g`, como decía el plan: esa
+    expresión retrocede en cada posición y un texto de 100 000 caracteres
+    tardaba 10 s, con el proceso bloqueado (reproducido).
 - **Flujo de trabajo:**
   - Una rama por tarea del plan (`feat/...`), PR a `main` con el CI en verde y
     merge commit (sin squash) para conservar la historia real.
@@ -1524,3 +1549,74 @@ Rama `docs/entrega`.
   con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 8 usa
   `sendSeq` y `sentTo` para elegir la cita de una respuesta, y la 9 cuenta
   lo pendiente en la nota de producción.
+- 2026-11-24: tarea 8 implementada en `feat/webhook`. Entran
+  `POST /webhooks/inbound-messages` con `HandleInboundMessage`,
+  `WebhooksController` e `InboundMessageDto`, `parseReply`
+  (`src/domain/patient-reply.ts`), `canReceiveReply` en `appointment.ts`, el
+  puerto `InboundMessageRepository` con `MikroOrmInboundMessageRepository`
+  (`insertIfNew`), `AppointmentRepository.lockLatestRepliable` y
+  `test/webhook.e2e-spec.ts`. Sin migraciones (la tabla `inbound_message` y
+  el índice `reminder_last_sent` vienen de la tarea 2) ni dependencias
+  nuevas. Cambios respecto al plan:
+  - se tocan también `mikro-orm-transactions.ts` (fábrica de repositorios),
+    `app.module.ts` y `src/domain/appointment.ts`;
+  - `lockLatestRepliable` es una sola consulta con `FOR UPDATE OF` la cita:
+    si la cita cambia mientras espera el bloqueo, Postgres vuelve a evaluar
+    la consulta y pasa a la anterior que cumpla (sección 2). La comprobación
+    con `canReceiveReply` en el caso de uso se mantiene, pero con esa
+    consulta nunca descarta nada;
+  - `parseReply` usa una expresión anclada en vez de la del plan, que
+    tardaba un tiempo cuadrático (sección 2), y se llama fuera de la
+    transacción;
+  - el 200 va sin cuerpo;
+  - tests añadidos al brief: `insertIfNew` con otra transacción que tiene el
+    mismo id, `receivedAt` frente al reloj, `from` que no es E.164 o que
+    lleva SQL, un recordatorio aún pendiente no cuenta, orden de envío
+    distinto del de creación, `sentAt` hacia atrás, NO después de SI, id
+    repetido tras uno ignorado, SI que espera a que cancelen la última cita,
+    NO mientras el job envía el pendiente, cuerpo en lista y otros 400 de
+    esquema, tilde en la primera letra y texto largo.
+
+  La revisión final de la rama no encontró nada crítico. Se arregló en la
+  misma rama la expresión de `parseReply`: «a» + 100 000 espacios + «a»
+  tardaba 10,4 s y el body parser admite ese tamaño en una sola petición.
+  Queda para otro cambio o para la tarea 9:
+  - un NUL en `messageId` o en `from`, o un `messageId` de unos 2,7 kB, da
+    500 y el proveedor reenviaría el mensaje sin fin (va con el validador de
+    texto compartido pendiente);
+  - el bloque «cancelar la cita y sus pendientes» se repite en
+    `HandleInboundMessage` y `CancelAppointment`;
+  - los e2e de concurrencia esperan 200 ms; en un CI lento podrían pasar
+    sin llegar al bloqueo (no dan falsos rojos);
+  - un mensaje ignorado no deja traza (id y motivo, sin texto ni teléfono);
+  - para el README y la nota de producción: dos NO seguidos desde un
+    teléfono compartido cancelan dos citas; un NO durante un `lost-response`
+    va a la cita anterior; `from` se compara tal cual, sin normalizar; y
+    `inbound_message` crece sin purga.
+
+  Cada test nuevo se vio fallar por su motivo. Los unitarios de
+  `parseReply`, contra un esqueleto que devolvía siempre `null` o siempre
+  `yes` y con 4 mutaciones de una línea; los de `canReceiveReply`, contra
+  esqueletos que devolvían siempre `true` o `false`. Los e2e fallaban todos
+  antes de existir el código (los de repositorio por el método ausente y
+  los de HTTP con 404), y además cada uno con su mutación, 31 en total: sin
+  `@HttpCode(200)`, sin el DTO o sin cada decorador, `from` como E.164, sin
+  mirar `insertIfNew` o registrando solo lo aplicado, `receivedAt` como hora
+  de negocio, SI que cancela, NO sin cancelar la cita o el pendiente,
+  pendientes sin bloqueo, sin `FOR UPDATE OF`, `send_seq asc`, orden por
+  `sent_at`, por id del recordatorio o de la cita, sin filtrar canceladas o
+  empezadas, `>=` en vez de `>`, teléfono del paciente en vez de `sent_to`,
+  sin filtrar por teléfono, teléfono concatenado en el SQL, sin `on
+  conflict` y otra `receivedAt` al guardar. La única que sobrevive es
+  quitar `canReceiveReply` del caso de uso, por lo dicho arriba. El cuerpo
+  en lista ya daba 400 antes de la tarea: solo cae sin el DTO.
+
+  Verificación: `npm run verify` en verde (18 archivos y 198 unitarios,
+  8 archivos y 161 e2e) y `docker compose -p clinicsay up --build -d --wait`
+  con un recorrido a mano: «Sí, gracias» ignorado, SI a la última enviada
+  de un teléfono compartido, el mismo `messageId` tras reprogramar sin
+  efecto, NO que cancela la cita y su pendiente, otro NO que cae en la
+  anterior, 400 `{ error }` sin `messageId` o con `receivedAt` sin zona,
+  `from` no E.164 con 200, el 200 sin cuerpo y un texto de 100 000
+  caracteres en 6 ms. `scripts/smoke.sh` llega con la tarea 9. Siguiente paso: revisar y mergear la PR; la tarea 9 escribe
+  el README y la nota de producción con lo pendiente de arriba.
