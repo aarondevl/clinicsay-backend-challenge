@@ -1,8 +1,11 @@
 /** Respuesta del paciente al recordatorio: SI confirma la cita y NO la cancela. */
 export type PatientReply = 'yes' | 'no';
 
-// Lo que no es una letra al principio o al final: espacios, signos y emojis.
-const AROUND_LETTERS = /^[^\p{L}]+|[^\p{L}]+$/gu;
+// Una sola palabra, con lo que no es una letra (espacios, signos, emojis)
+// delante y detrás. Anclada y con clases disjuntas, se lee en tiempo lineal:
+// `[^\p{L}]+$` con el flag `g` se probaba en cada posición y retrocedía hasta
+// el final, y 100 000 caracteres tardaban segundos.
+const ONE_WORD = /^[^\p{L}]*(\p{L}+)[^\p{L}]*$/u;
 // Marcas combinantes que quedan sueltas al descomponer (NFD) una letra con tilde.
 const COMBINING_MARKS = /\p{M}/gu;
 
@@ -15,11 +18,9 @@ const COMBINING_MARKS = /\p{M}/gu;
  * @returns `'yes'`, `'no'` o `null` si el texto se ignora.
  */
 export function parseReply(text: string): PatientReply | null {
-  const word = text
-    .normalize('NFD')
-    .replace(COMBINING_MARKS, '')
-    .replace(AROUND_LETTERS, '')
-    .toLowerCase();
+  const word = ONE_WORD.exec(
+    text.normalize('NFD').replace(COMBINING_MARKS, ''),
+  )?.[1]?.toLowerCase();
   if (word === 'si') return 'yes';
   if (word === 'no') return 'no';
   return null;

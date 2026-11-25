@@ -40,14 +40,15 @@ export class HandleInboundMessage {
    * @throws {ServiceUnavailableError} si la base no responde.
    */
   async execute(message: InboundMessage): Promise<void> {
+    // Pura: se lee fuera de la transacción para no retener la conexión.
+    const reply = parseReply(message.text);
     await this.transactions.run(async (repos) => {
+      // Se registra aunque el texto se ignore: un id repetido no hace nada.
       const isNew = await repos.inboundMessages.insertIfNew(
         message.messageId,
         message.receivedAt,
       );
-      if (!isNew) return;
-      const reply = parseReply(message.text);
-      if (reply === null) return;
+      if (!isNew || reply === null) return;
 
       // «No ha empezado» se mira con la hora del servicio, no con `receivedAt`.
       const now = this.clock.now();

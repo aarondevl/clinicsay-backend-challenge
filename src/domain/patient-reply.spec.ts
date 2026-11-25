@@ -36,4 +36,15 @@ describe('parseReply', () => {
   ])('%j se ignora', (text) => {
     expect(parseReply(text)).toBeNull();
   });
+
+  it.each([
+    ['solo espacios', ' '.repeat(100_000)],
+    ['espacios entre dos letras', `a${' '.repeat(100_000)}a`],
+  ])('un texto largo (%s) se lee en tiempo lineal', (_label, text) => {
+    // Con una búsqueda que retrocede por cada posición, 100 000 caracteres
+    // tardaban varios segundos y bloqueaban el proceso.
+    const start = performance.now();
+    expect(parseReply(text)).toBeNull();
+    expect(performance.now() - start).toBeLessThan(200);
+  });
 });
