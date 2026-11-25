@@ -1923,3 +1923,45 @@ Rama `docs/entrega`.
   peticiones al proveedor y `pending` con `attempts` 0; a las 09:00,
   `{"processed":1}`, `sent` con `sentAt` 2027-03-11T08:00:00Z y
   `scheduledFor` sin cambiar. Siguiente paso: revisar y mergear la PR #14.
+- 2026-11-24: arreglado en `fix/4xx-sin-cuerpo` otro hallazgo importante de
+  la revisión final de `main`: un 4xx del proveedor se podía reintentar.
+  - escenario: el proveedor responde 422 (en `provider/server.mjs`,
+    «rejected by the carrier (do not retry)») y corta la conexión antes de
+    terminar el cuerpo, o el cuerpo no
+    llega antes de `AbortSignal.timeout`. `HttpMessageProvider.send()` leía
+    el cuerpo en el mismo `try` que `fetch`, así que el `catch` devolvía
+    `network_error` o `timeout` aunque ya se supiera el código. El
+    recordatorio quedaba `pending` y a T+1 min salía otra petición, que
+    podía entregar un mensaje que el operador había rechazado. Con un 202
+    pasaba lo mismo: un intento de más;
+  - arreglo (sección 2, «Job de envío»): en cuanto `fetch` resuelve, el
+    resultado es `{ kind: 'response', status }`. El cuerpo se sigue leyendo
+    para liberar la conexión, en `discardBody`, y si falla solo se registra
+    con la clave de idempotencia. `timeout` y `network_error` quedan para
+    cuando no llegaron las cabeceras. `classifyProviderResult` no cambia;
+  - tests: `test/support/truncated-body-server.ts` responde el código con
+    las cabeceras y un `content-length` mayor que lo que envía, y después
+    corta la conexión (`cut`) o la deja abierta hasta el timeout (`stall`).
+    El proveedor falso no puede hacerlo porque siempre envía el cuerpo
+    completo. Contra él, un unitario del adaptador
+    (`http-message-provider.spec.ts`, con un caso más que comprueba que sin
+    cabeceras sigue siendo `network_error`) y un e2e del job: 422 →
+    `failed` y 202 → `sent`, los dos con `attempts` 1 y sin otra petición a
+    T+1 min ni a T+6 min. `AGENTS.md` cuenta en «Tests» esta forma de
+    provocar el fallo;
+  - sin migraciones ni dependencias nuevas; el README no cambia, porque ya
+    decía que se reintentan el error de red y el timeout.
+
+  Cada test nuevo se vio fallar por su motivo. El unitario, contra el
+  adaptador de `main`: `network_error` en vez de `response` 422 o 202 con
+  el cuerpo cortado, y `timeout` con el cuerpo que no llega (4 en rojo, el
+  de sin cabeceras en verde). El e2e, con ese mismo adaptador: `pending` en
+  vez de `failed`, y `pending` con `sentAt` nulo en vez de `sent` (4 en
+  rojo). Quitar el registro del fallo al leer el cuerpo hace caer los 4
+  unitarios.
+
+  Verificación tras mergear `main` con #14: `npm run verify` en verde (20
+  archivos y 236 unitarios, 8 archivos y 194 e2e), `docker compose -p
+  clinicsay up --build -d --wait` con los tres servicios sanos y
+  `./scripts/smoke.sh` con `exit=0`; después `docker compose -p clinicsay
+  down -v`. Siguiente paso: revisar y mergear la PR.
