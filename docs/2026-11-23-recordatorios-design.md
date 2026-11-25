@@ -313,10 +313,22 @@ Lo dicho en la reunión tiene peso, siempre que no contradiga el enunciado.
     timeout (`AbortSignal.timeout`) cubre también la lectura del cuerpo;
   - `processed` cuenta lo que trató esa pasada: enviados, reintentados,
     fallidos y descartados;
-  - un error dentro de la transacción de un recordatorio corta la pasada
-    (500, o 503 con la base caída). Lo que no llegó a confirmarse sigue
-    pendiente con sus intentos anteriores y la siguiente pasada lo repite con
-    la misma clave, sin duplicar el mensaje;
+  - un error inesperado dentro de la transacción de un recordatorio
+    (2026-11-24) deshace solo esa transacción. La pasada lo registra con su
+    id, no lo cuenta en `processed`, no lo vuelve a tomar y sigue con los
+    demás. Antes cortaba la pasada con un 500 y, como ese recordatorio va
+    primero por `next_attempt_at`, también todas las siguientes (reproducido
+    con una zona inválida puesta por SQL). Sigue `pending` con sus intentos
+    anteriores y no se marca `failed`: el error pudo llegar después de que el
+    proveedor lo aceptara, y la siguiente pasada lo repite con la misma clave
+    sin duplicar el mensaje. Sí cortan la pasada la base caída
+    (`ServiceUnavailableError`, 503) y un error antes de tomar ningún
+    recordatorio, que si no se repetiría sin fin;
+  - el id del recordatorio con error se apunta en los excluidos de la pasada
+    en cuanto se bloquea, y no viaja en el error: envolver el error dentro de
+    la transacción le ocultaría a `isDatabaseUnavailable`, que solo mira el
+    propio error, que la base se ha caído. Se registra con un puerto `Logger`
+    porque `src/application` no puede importar el de Nest;
   - el cierre ordenado aborta la señal y espera en
     `beforeApplicationShutdown`. En `onApplicationShutdown` llegaría tarde:
     antes Nest cierra el servidor HTTP, que espera a la petición del job, y

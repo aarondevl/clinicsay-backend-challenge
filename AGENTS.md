@@ -73,9 +73,9 @@ scripts/smoke.sh        # recorrido completo contra el compose levantado
 | Reintentos (`RETRY_DELAYS_MINUTES`, `MAX_ATTEMPTS`) | `src/domain/retry-policy.ts` | `retry-policy.spec.ts` |
 | Respuesta del proveedor → `sent`, reintento o `failed` | `src/domain/provider-outcome.ts` | `provider-outcome.spec.ts` |
 | Lectura de SI/NO | `src/domain/patient-reply.ts` | `patient-reply.spec.ts` |
-| Pasada del job (bloqueo, orden de descartes, llamada, guardado) | `src/application/reminders/run-reminder-pass.ts` | `test/reminder-job.e2e-spec.ts` |
+| Pasada del job (bloqueo, orden de descartes, llamada, guardado, un recordatorio con error no frena a los demás) | `src/application/reminders/run-reminder-pass.ts`, puerto `Logger` en `src/infrastructure/logging/nest-logger.ts` | `test/reminder-job.e2e-spec.ts`, `nest-logger.spec.ts` |
 | Llamada al proveedor (`Idempotency-Key`, timeout → `timeout`, otro fallo de `fetch` → `network_error`) | `src/infrastructure/provider/http-message-provider.ts` (puerto `MessageProvider`) | `test/reminder-job.e2e-spec.ts` |
-| `POST /jobs/reminders/run` y cierre ordenado (abortar y esperar a la pasada en `beforeApplicationShutdown`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
+| `POST /jobs/reminders/run` y cierre ordenado (el controlador registra la pasada con `track`, abortar y esperar a la pasada en `beforeApplicationShutdown`, `enableShutdownHooks` en `createApp`) | `src/http/jobs.controller.ts`, `src/http/shutdown-coordinator.ts`, `src/app.factory.ts` | `shutdown-coordinator.spec.ts`, `test/reminder-job.e2e-spec.ts` |
 | Webhook: 200 aunque se ignore, 400 solo por esquema (`from` sin validar como E.164), deduplicación (`insertIfNew`) y cita destino | `src/http/webhooks.controller.ts`, `src/http/dto/inbound-message.dto.ts`, `src/application/inbound/handle-inbound-message.ts`, `src/infrastructure/persistence/repositories/inbound-message.repository.ts` | `test/webhook.e2e-spec.ts` |
 | Crear clínicas y pacientes (zona IANA → 400, clínica inexistente o id no UUID → 404) | `src/application/clinics/create-clinic.ts`, `src/application/patients/create-patient.ts` | `test/clinics-patients.e2e-spec.ts` |
 | Crear, reprogramar y cancelar citas | `src/application/appointments/*.ts` | `test/appointments.e2e-spec.ts`, `test/reschedule-cancel.e2e-spec.ts` |
@@ -100,15 +100,17 @@ Las dependencias van hacia dentro: `http` → `application` → `domain`.
 | Carpeta | Contiene | Nunca usa |
 |---|---|---|
 | `src/domain` | Tipos y funciones puras | `@nestjs/*`, `@mikro-orm/*`, red, `process.env`, la hora actual |
-| `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `IdGenerator`, `Transactions`, repositorios, `MessageProvider`) como clases abstractas | `@nestjs/*`, `@mikro-orm/*`, `src/http`, `src/infrastructure` |
-| `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes, el generador de ids y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
+| `src/application` | Un caso de uso por archivo (clases sin decoradores) y los puertos (`Clock`, `SettableClock`, `IdGenerator`, `Transactions`, repositorios, `MessageProvider`, `Logger`) como clases abstractas | `@nestjs/*`, `@mikro-orm/*`, `src/http`, `src/infrastructure` |
+| `src/infrastructure` | Entidades `defineEntity`, repositorios, migraciones, cliente del proveedor, relojes, el generador de ids, el `Logger` sobre el de Nest y el controlador de `/health`, que es puro adaptador de la base | `src/http` |
 | `src/http` | Controladores finos, DTOs con class-validator, presentadores, filtro de errores y `ShutdownCoordinator` (cierre ordenado del job) | `@mikro-orm/*` |
 | `src/app.module.ts`, `src/app.factory.ts`, `src/main.ts`, `src/config/` | Composición: cablea todo | — |
 
 - `test/architecture.spec.ts` comprueba los imports de `src/domain` y
   `src/application`; si falla, el cambio está en la capa equivocada.
 - Los casos de uso se registran en `app.module.ts` con `useFactory`; los
-  puertos son los tokens de inyección.
+  puertos son los tokens de inyección. La excepción es `Logger`: cada
+  `useFactory` crea el suyo (`new NestLogger(<caso de uso>.name)`) para que el
+  log diga quién registra.
 - Los repositorios devuelven tipos del dominio, nunca entidades de MikroORM.
 - Cada caso de uso que escribe abre su transacción con `Transactions.run(...)`.
   Nunca se usa el `EntityManager` global.
@@ -177,6 +179,14 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   resultado antes del `COMMIT`. La llamada va dentro de la transacción para que
   otra pasada no tome el mismo intento. La misma clave en todos los intentos es
   lo que evita que el paciente reciba dos mensajes tras un 504.
+- **Un recordatorio no frena la cola:** si uno lanza un error inesperado
+  dentro de su transacción, solo se deshace esa. La pasada lo registra con su
+  id (puerto `Logger`), no lo cuenta en `processed`, no lo vuelve a tomar y
+  sigue con los demás. Queda `pending` y no `failed`, porque el error pudo
+  llegar después de que el proveedor lo aceptara: la pasada siguiente lo
+  repite con la misma clave. Sí cortan la pasada la base caída
+  (`ServiceUnavailableError`, 503) y un error antes de tomar ningún
+  recordatorio, que si no se repetiría sin fin.
 - **Descartes al enviar**, en este orden: `too_late` (la cita ya empezó),
   `no_phone`, `opted_out`. Ninguno llama al proveedor.
 - **Proveedor:** 202 o 200 (duplicado) → `sent`, igual que cualquier otro 2xx.
@@ -193,7 +203,9 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   otro recordatorio y la que tiene uno lo guarda antes de que se cierre la
   base. Tiene que ser ahí y no en `onApplicationShutdown`: Nest cierra antes
   el servidor HTTP, que espera a la petición del job, y una pasada sin
-  abortar seguiría hasta vaciar la cola.
+  abortar seguiría hasta vaciar la cola. Para eso `JobsController` registra
+  cada pasada con `track` y `createApp` llama a `enableShutdownHooks()`, que
+  convierte SIGTERM en `app.close()`.
 - **Franja de silencio:** `[21:00, 09:00)` en hora local; lo que cae dentro pasa
   a las 09:00 siguientes. Las citas con `virtual: true` usan `Europe/Madrid`
   para la hora, la franja y el texto. `virtual` es una extensión opcional del
@@ -223,8 +235,14 @@ Cada uno tiene un test; si un cambio lo rompe, ese test debe fallar.
   el timeout se prueba con un `providerTimeoutMs` bajo en `startTestApp` y el
   proxy TCP (`test/support/tcp-proxy.ts`) con `dropResponses(true)`, que deja
   llegar la petición y descarta la respuesta, y el error de red con un
-  `providerUrl` a un puerto cerrado. La caída de la base se prueba poniendo
-  ese mismo proxy entre la app y Postgres y cortándolo.
+  `providerUrl` a `startResetServer` (`test/support/reset-server.ts`), que
+  corta cada conexión al aceptarla. No vale un puerto recién liberado: otro
+  proceso puede ocuparlo y responder. La caída de la base se prueba poniendo
+  el proxy TCP entre la app y Postgres y cortándolo.
+- Un error inesperado dentro de una transacción se provoca con un dato que
+  la API no acepta escrito por SQL directo, o con una subclase de
+  `Transactions` que envuelve la de la app y falla donde hace falta (antes de
+  tomar nada o al confirmar).
 - Un bloqueo que otra transacción retiene se prueba con `holdLock`
   (`test/support/locks.ts`): abre la transacción, toma el bloqueo y no
   confirma hasta `release()`.
